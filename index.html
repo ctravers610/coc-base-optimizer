@@ -98,8 +98,9 @@
   .map-tools button { font-size: 13px; padding: 4px 9px; line-height: 1.2; }
   .map-tools .seg { display: inline-flex; }
   .map-tools .seg button { border-radius: 0; }
+  .map-tools .seg button + button { margin-left: -1px; }
   .map-tools .seg button:first-child { border-radius: 6px 0 0 6px; }
-  .map-tools .seg button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+  .map-tools .seg button:last-child { border-radius: 0 6px 6px 0; }
   .map-tools .seg button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   canvas#map { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--line); touch-action: none; cursor: crosshair; }
   .tooltip { position: absolute; pointer-events: none; background: var(--bg2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); max-width: 240px; z-index: 3; }
@@ -212,8 +213,9 @@
       <canvas id="map" width="704" height="704" aria-label="Base layout map"></canvas>
       <div class="map-tools">
         <span class="seg" role="group" aria-label="Map view">
-          <button id="btn-view-game" class="on" title="The diamond view you see in the game">Game</button>
-          <button id="btn-view-top" title="A flat top-down grid">Top-down</button>
+          <button id="btn-view-game" class="on" data-view="game" title="The diamond view you see in the game, with buildings as blocks">Game</button>
+          <button id="btn-view-top" data-view="top" title="Flat top-down view on the same diagonal as the game">Top-down</button>
+          <button id="btn-view-grid" data-view="grid" title="Flat square grid">Grid</button>
         </span>
         <button id="btn-rot-l" title="Rotate the map a quarter turn anticlockwise">&#8634;</button>
         <button id="btn-rot-r" title="Rotate the map a quarter turn clockwise">&#8635;</button>
@@ -222,7 +224,6 @@
       <div class="tooltip" id="tooltip" hidden></div>
     </div>
     <div class="toggles">
-      <input type="checkbox" id="view-iso" checked hidden aria-hidden="true">
       <label><input type="checkbox" id="show-traps" checked> Traps</label>
       <label title="Dot every free tile inside the walls"><input type="checkbox" id="show-empty" checked> Empty tiles</label>
       <label><input type="checkbox" id="show-heat"> Coverage heat (red = thin ground coverage)</label>
@@ -508,19 +509,23 @@
   const pointers = new Map();    // active pointers, for pinch zoom
   let pinch = null;
 
-  function isoOn() { return $('view-iso').checked; }
-  function canvasSize() { return isoOn() ? [G * IW * 2 + PAD * 2, G * IH * 2 + PAD * 2 + ISO_TOP] : [G * T + PAD * 2, G * T + PAD * 2]; }
+  let viewMode = 'game';        // 'game' = diamond with raised blocks, 'top' = flat diamond, 'grid' = flat square grid
+  function isoOn() { return viewMode !== 'grid'; }   // diamond projection
+  function gameOn() { return viewMode === 'game'; }  // raised blocks and 2:1 tiles
+  function IHv() { return gameOn() ? IH : IW; }       // half tile height: squashed in the game view, square otherwise
+  function topPad() { return gameOn() ? ISO_TOP : 0; }
+  function canvasSize() { return isoOn() ? [G * IW * 2 + PAD * 2, G * IHv() * 2 + PAD * 2 + topPad()] : [G * T + PAD * 2, G * T + PAD * 2]; }
   // grid coordinates (may be fractional) -> canvas px
   function P(x, y) {
     [x, y] = R(x, y);
-    const b = isoOn() ? [PAD + G * IW + (x - y) * IW, PAD + ISO_TOP + (x + y) * IH] : [PAD + x * T, PAD + y * T];
+    const b = isoOn() ? [PAD + G * IW + (x - y) * IW, PAD + topPad() + (x + y) * IHv()] : [PAD + x * T, PAD + y * T];
     return [b[0] * view.Z + view.VX, b[1] * view.Z + view.VY];
   }
   // canvas px -> fractional grid coordinates
   function unP(px, py) {
     px = (px - view.VX) / view.Z; py = (py - view.VY) / view.Z;
     if (!isoOn()) return unR((px - PAD) / T, (py - PAD) / T);
-    const u = (px - PAD - G * IW) / IW, v = (py - PAD - ISO_TOP) / IH;
+    const u = (px - PAD - G * IW) / IW, v = (py - PAD - topPad()) / IHv();
     return unR((u + v) / 2, (v - u) / 2);
   }
   function clampView() {
@@ -538,7 +543,7 @@
   function resetZoom() { view.Z = 1; view.VX = 0; view.VY = 0; clampView(); render(); }
   function poly(pts) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); }
   function quad(x, y, w, h, dy = 0) { return [P(x, y), P(x + w, y), P(x + w, y + h), P(x, y + h)].map(([a, b]) => [a, b - dy]); }
-  function heightOf(it) { return isoOn() ? Math.round(IH * (0.9 + 0.6 * Math.min(it.w, it.h)) * view.Z) : 0; }
+  function heightOf(it) { return gameOn() ? Math.round(IH * (0.9 + 0.6 * Math.min(it.w, it.h)) * view.Z) : 0; }
   function shade(c, f) {
     const m = /^#([0-9a-f]{6})$/i.exec(c); if (!m) return c;
     const n = parseInt(m[1], 16), ch = (s) => clamp(Math.round(((n >> s) & 255) * f), 0, 255);
@@ -586,9 +591,9 @@
       for (const it of items) for (let j = it.y; j < it.y + it.h; j++) for (let i = it.x; i < it.x + it.w; i++) occ[j * G + i] = 1;
       if (result && !live) for (const tr of result.traps) for (let j = tr.y; j < tr.y + tr.h; j++) for (let i = tr.x; i < tr.x + tr.w; i++) occ[j * G + i] = 1;
       ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      const rr = (isoOn() ? 1.7 : 2.2) * view.Z;
+      const rr = (gameOn() ? 1.7 : 2.2) * view.Z;
       for (const c of cells) for (let j = c.y0; j < c.y0 + c.h; j++) for (let i = c.x0; i < c.x0 + c.w; i++) if (!occ[j * G + i]) {
-        const [cx, cy] = P(i + 0.5, j + 0.5); ctx.beginPath(); ctx.ellipse(cx, cy, rr, isoOn() ? rr * 0.6 : rr, 0, 0, Math.PI * 2); ctx.fill();
+        const [cx, cy] = P(i + 0.5, j + 0.5); ctx.beginPath(); ctx.ellipse(cx, cy, rr, gameOn() ? rr * 0.6 : rr, 0, 0, Math.PI * 2); ctx.fill();
       }
     }
     // heat
@@ -623,7 +628,7 @@
         ctx.strokeStyle = i === hoverTrap ? '#fff' : 'rgba(255,255,255,0.95)'; ctx.lineWidth = i === hoverTrap ? 2.5 : 1.5; ctx.stroke(); ctx.lineWidth = 1;
         if (showLabels) {
           const [cx, cy] = P(tr.x + tr.w / 2, tr.y + tr.h / 2);
-          const size = (tr.w === 2 ? 10 : (isoOn() ? 7 : 8)) * Z;
+          const size = (tr.w === 2 ? 10 : (gameOn() ? 7 : 8)) * Z;
           ctx.font = `700 ${size}px ${cssVar('--font-mono')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
           ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.strokeText(tr.short, cx, cy + 0.5); ctx.lineWidth = 1;
           ctx.fillStyle = '#fff'; ctx.fillText(tr.short, cx, cy + 0.5);
@@ -648,7 +653,7 @@
   function rangeEllipse(it, r) {
     const [cx, cy] = P(it.x + it.w / 2, it.y + it.h / 2);
     ctx.beginPath();
-    if (isoOn()) ctx.ellipse(cx, cy, r * Math.SQRT2 * IW, r * Math.SQRT2 * IH, 0, 0, Math.PI * 2);
+    if (isoOn()) ctx.ellipse(cx, cy, r * Math.SQRT2 * IW, r * Math.SQRT2 * IHv(), 0, 0, Math.PI * 2);
     else ctx.arc(cx, cy, r * T, 0, Math.PI * 2);
   }
   function drawRange(it, color, strong) {
@@ -691,7 +696,7 @@
     }
   }
   function drawWall(x, y, stone) {
-    if (isoOn()) drawBlock(x, y, 1, 1, 6 * view.Z, stone, 0.12, 'rgba(0,0,0,0.3)', 1);
+    if (isoOn()) drawBlock(x, y, 1, 1, gameOn() ? 6 * view.Z : 0, stone, 0.12, 'rgba(0,0,0,0.3)', 1);
     else { const [bx, by, bw, bh] = bbox(quad(x, y, 1, 1)), i = view.Z; ctx.fillStyle = stone; ctx.fillRect(bx + i, by + i, bw - 2 * i, bh - 2 * i); }
   }
   function drawItem(it, hl, showLabels, fg) {
@@ -704,7 +709,7 @@
     }
     if (!showLabels) return;
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const big = it.w >= 3, iso = isoOn();
+    const big = it.w >= 3, iso = gameOn();
     const Z = view.Z;
     ctx.font = `700 ${(big ? (iso ? 11 : 12) : (iso ? 9 : 10)) * Z}px ${cssVar('--font-display')}`;
     ctx.fillText(it.short, cx, cy - (big ? 5 : 3) * Z);
@@ -1106,12 +1111,12 @@ Reply with only a JSON object of this exact shape and nothing else:
   function rotate(dir) { view.rot = (view.rot + dir + 4) & 3; try { localStorage.setItem(ROT_KEY, String(view.rot)); } catch (e) { /* ignore */ } hover = -1; hoverTrap = -1; render(); }
   $('btn-rot-l').addEventListener('click', () => rotate(-1));
   $('btn-rot-r').addEventListener('click', () => rotate(1));
-  try { if (localStorage.getItem(VIEW_KEY) === 'top') $('view-iso').checked = false; } catch (e) { /* storage unavailable */ }
-  function syncViewButtons() { $('btn-view-game').classList.toggle('on', isoOn()); $('btn-view-top').classList.toggle('on', !isoOn()); }
-  $('btn-view-game').addEventListener('click', () => { if (!isoOn()) { $('view-iso').checked = true; $('view-iso').dispatchEvent(new Event('change')); } });
-  $('btn-view-top').addEventListener('click', () => { if (isoOn()) { $('view-iso').checked = false; $('view-iso').dispatchEvent(new Event('change')); } });
+  const viewButtons = [...document.querySelectorAll('.map-tools .seg button[data-view]')];
+  function syncViewButtons() { for (const b of viewButtons) b.classList.toggle('on', b.dataset.view === viewMode); }
+  function setView(m) { if (!['game', 'top', 'grid'].includes(m) || m === viewMode) return; viewMode = m; try { localStorage.setItem(VIEW_KEY, m); } catch (e) { /* ignore */ } syncViewButtons(); hover = -1; hoverTrap = -1; resetZoom(); }
+  try { const m = localStorage.getItem(VIEW_KEY); if (m && ['game', 'top', 'grid'].includes(m)) viewMode = m; } catch (e) { /* storage unavailable */ }
+  for (const b of viewButtons) b.addEventListener('click', () => setView(b.dataset.view));
   syncViewButtons();
-  $('view-iso').addEventListener('change', () => { syncViewButtons(); try { localStorage.setItem(VIEW_KEY, isoOn() ? 'game' : 'top'); } catch (e) { /* ignore */ } hover = -1; resetZoom(); });
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
   new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
