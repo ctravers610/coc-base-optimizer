@@ -94,6 +94,7 @@
   .board { display: grid; gap: 16px; min-width: 0; }
   .map-wrap { position: relative; width: 100%; max-width: 760px; margin: 0 auto; }
   .map-wrap.iso { max-width: 980px; }
+  .zoom-reset { position: absolute; top: 8px; right: 8px; z-index: 2; font-size: 12px; padding: 4px 9px; }
   canvas#map { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--line); touch-action: none; cursor: crosshair; }
   .tooltip { position: absolute; pointer-events: none; background: var(--bg2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); max-width: 240px; z-index: 3; }
   .tooltip b { font-family: var(--font-display); font-size: 16px; }
@@ -203,6 +204,7 @@
   <section class="board">
     <div class="map-wrap">
       <canvas id="map" width="704" height="704" aria-label="Base layout map"></canvas>
+      <button class="zoom-reset" id="btn-zoom-reset" hidden title="Back to the whole map (or double-click empty ground)">Reset zoom</button>
       <div class="tooltip" id="tooltip" hidden></div>
     </div>
     <div class="toggles">
@@ -213,6 +215,7 @@
       <label><input type="checkbox" id="show-labels" checked> Labels</label>
     </div>
     <div class="legend" id="legend"></div>
+    <p class="hint">Scroll (or pinch) over the map to zoom. When zoomed in, drag empty ground to pan and double-click it to zoom back out.</p>
 
     <div class="readouts">
       <section class="panel" aria-labelledby="score-h">
@@ -477,24 +480,44 @@
   const IW = 10, IH = 5;        // game view: half width / half height of one tile diamond
   const ISO_TOP = 34;           // head room above the diamond for the tallest buildings
   const VIEW_KEY = 'clash-base-optimizer:view';
-  let hover = -1, drag = null;
+  let hover = -1, hoverTrap = -1, drag = null;
+  // zoom and pan, in canvas px: a base point b maps to b * Z + V
+  const view = { Z: 1, VX: 0, VY: 0 };
+  const ZMIN = 1, ZMAX = 6;
+  let pan = null;                // {cx, cy, VX, VY} while dragging empty ground
+  const pointers = new Map();    // active pointers, for pinch zoom
+  let pinch = null;
 
   function isoOn() { return $('view-iso').checked; }
   function canvasSize() { return isoOn() ? [G * IW * 2 + PAD * 2, G * IH * 2 + PAD * 2 + ISO_TOP] : [G * T + PAD * 2, G * T + PAD * 2]; }
   // grid coordinates (may be fractional) -> canvas px
   function P(x, y) {
-    if (!isoOn()) return [PAD + x * T, PAD + y * T];
-    return [PAD + G * IW + (x - y) * IW, PAD + ISO_TOP + (x + y) * IH];
+    const b = isoOn() ? [PAD + G * IW + (x - y) * IW, PAD + ISO_TOP + (x + y) * IH] : [PAD + x * T, PAD + y * T];
+    return [b[0] * view.Z + view.VX, b[1] * view.Z + view.VY];
   }
   // canvas px -> fractional grid coordinates
   function unP(px, py) {
+    px = (px - view.VX) / view.Z; py = (py - view.VY) / view.Z;
     if (!isoOn()) return [(px - PAD) / T, (py - PAD) / T];
     const u = (px - PAD - G * IW) / IW, v = (py - PAD - ISO_TOP) / IH;
     return [(u + v) / 2, (v - u) / 2];
   }
+  function clampView() {
+    const [W, H] = canvasSize();
+    view.Z = clamp(view.Z, ZMIN, ZMAX);
+    view.VX = clamp(view.VX, W - W * view.Z, 0); view.VY = clamp(view.VY, H - H * view.Z, 0);
+    $('btn-zoom-reset').hidden = view.Z <= 1.001;
+  }
+  // zoom by `factor` keeping the canvas point (cx, cy) fixed
+  function zoomAt(cx, cy, factor) {
+    const Z0 = view.Z, Z1 = clamp(Z0 * factor, ZMIN, ZMAX);
+    view.VX = cx - (cx - view.VX) * Z1 / Z0; view.VY = cy - (cy - view.VY) * Z1 / Z0; view.Z = Z1;
+    clampView(); render();
+  }
+  function resetZoom() { view.Z = 1; view.VX = 0; view.VY = 0; clampView(); render(); }
   function poly(pts) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); }
   function quad(x, y, w, h, dy = 0) { return [P(x, y), P(x + w, y), P(x + w, y + h), P(x, y + h)].map(([a, b]) => [a, b - dy]); }
-  function heightOf(it) { return isoOn() ? Math.round(IH * (1 + 0.8 * Math.min(it.w, it.h))) : 0; }
+  function heightOf(it) { return isoOn() ? Math.round(IH * (1 + 0.8 * Math.min(it.w, it.h)) * view.Z) : 0; }
   function shade(c, f) {
     const m = /^#([0-9a-f]{6})$/i.exec(c); if (!m) return c;
     const n = parseInt(m[1], 16), ch = (s) => clamp(Math.round(((n >> s) & 255) * f), 0, 255);
@@ -542,18 +565,7 @@
     // ranges
     const showRanges = $('show-ranges').checked;
     if (showRanges) for (const it of items) if (it.isDef && it.range && it.range < 40) drawRange(it, 'rgba(255,255,255,0.35)');
-    // traps lie flat on the ground
     const showLabels = $('show-labels').checked;
-    if ($('show-traps').checked && result && !live) {
-      for (const tr of result.traps) {
-        const [cx, cy] = P(tr.x + tr.w / 2, tr.y + tr.h / 2);
-        const r = isoOn() ? (tr.w === 2 ? IW * 1.3 : IW * 0.62) : (tr.w === 2 ? T * 0.75 : T * 0.36);
-        ctx.beginPath(); ctx.ellipse(cx, cy, r, isoOn() ? r / 2 : r, 0, 0, Math.PI * 2);
-        ctx.fillStyle = TRAP_COLORS[tr.target] || '#555'; ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.stroke();
-        if (showLabels) { ctx.fillStyle = '#fff'; ctx.font = `600 ${tr.w === 2 ? (isoOn() ? 9 : 11) : 8}px ${cssVar('--font-mono')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(tr.short, cx, cy + 0.5); }
-      }
-    }
     // walls and buildings: in the game view draw back to front so nearer blocks cover farther ones
     const objs = [];
     for (const [x, y] of walls) objs.push({ wall: true, x, y, w: 1, h: 1, d: x + y + 1 });
@@ -563,6 +575,23 @@
     for (const o of objs) {
       if (o.wall) drawWall(o.x, o.y, stone);
       else drawItem(o.it, o.k === hover, showLabels, fg);
+    }
+    // traps: drawn last as full-tile markers so they are always visible
+    if ($('show-traps').checked && result && !live) {
+      const Z = view.Z;
+      result.traps.forEach((tr, i) => {
+        const pts = quad(tr.x + 0.08, tr.y + 0.08, tr.w - 0.16, tr.h - 0.16), col = TRAP_COLORS[tr.target] || '#555';
+        poly(pts); ctx.fillStyle = col; ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 3; ctx.stroke();
+        ctx.strokeStyle = i === hoverTrap ? '#fff' : 'rgba(255,255,255,0.95)'; ctx.lineWidth = i === hoverTrap ? 2.5 : 1.5; ctx.stroke(); ctx.lineWidth = 1;
+        if (showLabels) {
+          const [cx, cy] = P(tr.x + tr.w / 2, tr.y + tr.h / 2);
+          const size = (tr.w === 2 ? 10 : (isoOn() ? 7 : 8)) * Z;
+          ctx.font = `700 ${size}px ${cssVar('--font-mono')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.strokeText(tr.short, cx, cy + 0.5); ctx.lineWidth = 1;
+          ctx.fillStyle = '#fff'; ctx.fillText(tr.short, cx, cy + 0.5);
+        }
+      });
     }
     // hover range
     if (hover >= 0 && items[hover] && items[hover].isDef && items[hover].range) drawRange(items[hover], 'rgba(255,255,255,0.9)', true);
@@ -599,6 +628,7 @@
     const [a, b, c, d] = quad(x + inset, y + inset, w - 2 * inset, h - 2 * inset);
     const up = (p) => [p[0], p[1] - hgt];
     if (hgt > 0) {
+      ctx.lineJoin = 'round';
       ctx.fillStyle = shade(color, 0.62); poly([d, c, up(c), up(d)]); ctx.fill();   // left face (toward +y)
       ctx.fillStyle = shade(color, 0.78); poly([b, c, up(c), up(b)]); ctx.fill();   // right face (toward +x)
       ctx.fillStyle = color; poly([a, b, c, d].map(up)); ctx.fill();
@@ -611,8 +641,8 @@
     }
   }
   function drawWall(x, y, stone) {
-    if (isoOn()) drawBlock(x, y, 1, 1, 6, stone, 0.12, 'rgba(0,0,0,0.3)', 1);
-    else { ctx.fillStyle = stone; ctx.fillRect(PAD + x * T + 1, PAD + y * T + 1, T - 2, T - 2); }
+    if (isoOn()) drawBlock(x, y, 1, 1, 6 * view.Z, stone, 0.12, 'rgba(0,0,0,0.3)', 1);
+    else { const [a, , c] = quad(x, y, 1, 1), i = view.Z; ctx.fillStyle = stone; ctx.fillRect(a[0] + i, a[1] + i, c[0] - a[0] - 2 * i, c[1] - a[1] - 2 * i); }
   }
   function drawItem(it, hl, showLabels, fg) {
     const hgt = heightOf(it), color = colorOf(it);
@@ -625,9 +655,10 @@
     if (!showLabels) return;
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     const big = it.w >= 3, iso = isoOn();
-    ctx.font = `700 ${big ? (iso ? 11 : 12) : (iso ? 9 : 10)}px ${cssVar('--font-display')}`;
-    ctx.fillText(it.short, cx, cy - (big ? 5 : 3));
-    if (it.lv && it.id !== 'hero-banner') { ctx.font = `600 ${big ? (iso ? 9 : 10) : 8}px ${cssVar('--font-mono')}`; ctx.fillText(String(it.lv), cx, cy + (big ? 6 : 5)); }
+    const Z = view.Z;
+    ctx.font = `700 ${(big ? (iso ? 11 : 12) : (iso ? 9 : 10)) * Z}px ${cssVar('--font-display')}`;
+    ctx.fillText(it.short, cx, cy - (big ? 5 : 3) * Z);
+    if (it.lv && it.id !== 'hero-banner') { ctx.font = `600 ${(big ? (iso ? 9 : 10) : 8) * Z}px ${cssVar('--font-mono')}`; ctx.fillText(String(it.lv), cx, cy + (big ? 6 : 5) * Z); }
   }
   function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
 
@@ -661,12 +692,48 @@
     }
     return -1;
   }
+  canvas.addEventListener('wheel', (ev) => {
+    const step = ev.deltaMode === 1 ? 40 : 1;   // lines vs pixels
+    const factor = Math.exp(-ev.deltaY * step * (ev.ctrlKey ? 0.01 : 0.002));
+    if (clamp(view.Z * factor, ZMIN, ZMAX) === view.Z) return;   // nothing to zoom: let the page scroll
+    ev.preventDefault();
+    const [cx, cy] = canvasPoint(ev);
+    zoomAt(cx, cy, factor);
+  }, { passive: false });
+  canvas.addEventListener('dblclick', (ev) => { if (itemAtEv(ev) < 0) resetZoom(); });
+  $('btn-zoom-reset').addEventListener('click', resetZoom);
+  function trapAtEv(ev) {
+    if (!result || live || !$('show-traps').checked) return -1;
+    const [px, py] = canvasPoint(ev);
+    for (let i = result.traps.length - 1; i >= 0; i--) { const tr = result.traps[i]; if (inPoly(px, py, quad(tr.x, tr.y, tr.w, tr.h))) return i; }
+    return -1;
+  }
   canvas.addEventListener('pointermove', (ev) => {
+    if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
+    if (pinch && pointers.size >= 2) {
+      const [p1, p2] = [...pointers.values()];
+      const dist = Math.hypot(p1[0] - p2[0], p1[1] - p2[1]), r = canvas.getBoundingClientRect(), s = canvasSize()[0] / r.width;
+      const mx = ((p1[0] + p2[0]) / 2 - r.left) * s, my = ((p1[1] + p2[1]) / 2 - r.top) * s;
+      const Z1 = clamp(pinch.Z * dist / pinch.dist, ZMIN, ZMAX);
+      view.VX = mx - pinch.bx * Z1; view.VY = my - pinch.by * Z1; view.Z = Z1; clampView(); render(); return;
+    }
+    if (pan) {
+      const r = canvas.getBoundingClientRect(), s = canvasSize()[0] / r.width;
+      view.VX = pan.VX + (ev.clientX - pan.cx) * s; view.VY = pan.VY + (ev.clientY - pan.cy) * s; clampView(); render(); return;
+    }
     if (drag) { const [tx, ty] = tileAt(ev); drag.gx = clamp(tx - drag.dx, 0, G - drag.w); drag.gy = clamp(ty - drag.dy, 0, G - drag.h); render(); return; }
-    const k = itemAtEv(ev);
-    if (k !== hover) { hover = k; render(); }
+    const kt = trapAtEv(ev), k = kt >= 0 ? -1 : itemAtEv(ev);   // traps are drawn on top, so they win the hover
+    if (k !== hover || kt !== hoverTrap) { hover = k; hoverTrap = kt; render(); }
     const tip = $('tooltip');
-    if (k >= 0) {
+    if (kt >= 0) {
+      const tr = result.traps[kt], TRIG = { ground: 'ground troops', air: 'air troops', both: 'any troop' };
+      tip.innerHTML = `<b>${tr.name}</b>${tr.lv ? ' <span class="mono">lv ' + tr.lv + '</span>' : ''}<div class="mono">trap · triggers on ${TRIG[tr.target] || tr.target}</div><div class="mono">tile ${tr.x},${tr.y}</div>`;
+      tip.hidden = false;
+      const r = canvas.getBoundingClientRect();
+      let lx = ev.clientX - r.left + 14, ly = ev.clientY - r.top + 14;
+      if (lx + 240 > r.width) lx = ev.clientX - r.left - 250;
+      tip.style.left = lx + 'px'; tip.style.top = ly + 'px';
+    } else if (k >= 0) {
       const it = currentItems()[k];
       const stat = it.isDef ? `<div class="mono">range ${it.range}${it.minRange ? ' (min ' + it.minRange + ')' : ''} · ${it.target} · ${Math.round(it.dps)} dps · ${it.hp} hp</div>` : (it.hp ? `<div class="mono">${it.hp} hp</div>` : '');
       tip.innerHTML = `<b>${it.name}${it.idx ? ' #' + it.idx : ''}</b>${it.lv && it.id !== 'hero-banner' ? ' <span class="mono">lv ' + it.lv + '</span>' : ''}${stat}<div class="mono">tile ${it.x},${it.y} · ${it.place === 'in' ? 'inside walls' : 'outside'}</div>`;
@@ -677,17 +744,35 @@
       tip.style.left = lx + 'px'; tip.style.top = ly + 'px';
     } else tip.hidden = true;
   });
-  canvas.addEventListener('pointerleave', () => { hover = -1; $('tooltip').hidden = true; render(); });
+  canvas.addEventListener('pointerleave', () => { hover = -1; hoverTrap = -1; $('tooltip').hidden = true; render(); });
   canvas.addEventListener('pointerdown', (ev) => {
-    if (!result || live || worker) return;
-    const k = itemAtEv(ev);
-    if (k < 0) return;
+    pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
+    canvas.setPointerCapture(ev.pointerId);
+    if (pointers.size === 2) {
+      // second finger: switch from whatever was happening to a pinch zoom
+      drag = null; pan = null; canvas.style.cursor = '';
+      const [p1, p2] = [...pointers.values()], r = canvas.getBoundingClientRect(), s = canvasSize()[0] / r.width;
+      const mx = ((p1[0] + p2[0]) / 2 - r.left) * s, my = ((p1[1] + p2[1]) / 2 - r.top) * s;
+      pinch = { dist: Math.max(1, Math.hypot(p1[0] - p2[0], p1[1] - p2[1])), Z: view.Z, bx: (mx - view.VX) / view.Z, by: (my - view.VY) / view.Z };
+      render(); return;
+    }
+    if (pointers.size > 2 || pinch) return;
+    const k = (!result || live || worker) ? -1 : itemAtEv(ev);
+    if (k < 0) {
+      if (view.Z > 1 || ev.button === 1) { pan = { cx: ev.clientX, cy: ev.clientY, VX: view.VX, VY: view.VY }; canvas.style.cursor = 'grabbing'; }
+      return;
+    }
     const it = result.items[k], [tx, ty] = tileAt(ev);
     drag = { idx: k, dx: tx - it.x, dy: ty - it.y, w: it.w, h: it.h, gx: it.x, gy: it.y };
-    canvas.setPointerCapture(ev.pointerId);
     $('tooltip').hidden = true;
   });
+  function endPointer(ev) {
+    pointers.delete(ev.pointerId);
+    if (pinch && pointers.size < 2) pinch = null;
+    if (pan) { pan = null; canvas.style.cursor = ''; }
+  }
   canvas.addEventListener('pointerup', (ev) => {
+    endPointer(ev);
     if (!drag) return;
     const d = drag; drag = null;
     const it = result.items[d.idx];
@@ -697,7 +782,7 @@
     result = r; save(); renderAll();
     setStatus(`Moved ${it.name}. Score re-computed.`);
   });
-  canvas.addEventListener('pointercancel', () => { drag = null; render(); });
+  canvas.addEventListener('pointercancel', (ev) => { endPointer(ev); drag = null; render(); });
 
   // ---------- readouts ----------
   const PART_LABELS = { coverage: 'Fire coverage', centrality: 'Core protection', depth: 'Wall layers', spacing: 'Defense spread', compartments: 'Compartments', splash: 'Splash support', outside: 'Outer ring', sweeper: 'Sweepers' };
@@ -968,7 +1053,7 @@ Reply with only a JSON object of this exact shape and nothing else:
   $('btn-reset').addEventListener('click', () => { inv.rows = {}; inv.traps = {}; inv.walls = {}; inv.thWeaponLv = null; buildInventory(); save(); toast('Counts and levels reset to the Town Hall maximum.'); });
   ['show-traps', 'show-heat', 'show-ranges', 'show-labels'].forEach(id => $(id).addEventListener('change', render));
   try { if (localStorage.getItem(VIEW_KEY) === 'top') $('view-iso').checked = false; } catch (e) { /* storage unavailable */ }
-  $('view-iso').addEventListener('change', () => { try { localStorage.setItem(VIEW_KEY, isoOn() ? 'game' : 'top'); } catch (e) { /* ignore */ } hover = -1; render(); });
+  $('view-iso').addEventListener('change', () => { try { localStorage.setItem(VIEW_KEY, isoOn() ? 'game' : 'top'); } catch (e) { /* ignore */ } hover = -1; resetZoom(); });
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
   new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
