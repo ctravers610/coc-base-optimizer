@@ -97,14 +97,50 @@ function createOptimizer() {
 
   function buildBox(skel) {
     const x0 = Math.floor((G - skel.tw) / 2), y0 = Math.floor((G - skel.th) / 2);
-    const cells = [];
+    let cells = [];
     let cy = y0 + 1;
     for (const h of skel.H) {
       let cx = x0 + 1;
       for (const w of skel.W) { cells.push({ x0: cx, y0: cy, w, h }); cx += w + 1; }
       cy += h + 1;
     }
-    return { x0, y0, tw: skel.tw, th: skel.th, W: skel.W, H: skel.H, cells };
+    // splits: {k, axis: 'h'|'v', at} cuts compartment k with a wall line, spending w (or h) spare pieces
+    for (const sp of skel.splits || []) {
+      const c = cells[sp.k]; if (!c) continue;
+      if (sp.axis === 'h') cells.splice(sp.k, 1, { x0: c.x0, y0: c.y0, w: c.w, h: sp.at }, { x0: c.x0, y0: c.y0 + sp.at + 1, w: c.w, h: c.h - sp.at - 1 });
+      else cells.splice(sp.k, 1, { x0: c.x0, y0: c.y0, w: sp.at, h: c.h }, { x0: c.x0 + sp.at + 1, y0: c.y0, w: c.w - sp.at - 1, h: c.h });
+    }
+    const extra = (skel.extra || []).filter(([x, y]) => x >= 0 && y >= 0 && x < G && y < G);
+    return { x0, y0, tw: skel.tw, th: skel.th, W: skel.W, H: skel.H, splits: skel.splits || [], cells, extra };
+  }
+  // Spend spare pieces on a wall line through the most central, largest compartment (an extra compartment is
+  // worth more than loose pieces). Returns a new skeleton with the splits, or null when nothing fits.
+  function withSplits(sk, budget) {
+    const skel = { ...sk, splits: [] };
+    let left = budget - sk.walls;
+    const box = () => buildBox(skel);
+    for (let guard = 0; guard < 6 && left >= 3; guard++) {
+      const cells = box().cells;
+      let best = null;
+      cells.forEach((c, k) => {
+        if (skel.splits.some(sp => sp.k === k)) return;           // one split per original cell is enough
+        const opts = [];
+        if (c.h >= 7 && c.w <= left) opts.push({ k, axis: 'h', at: Math.floor(c.h / 2), cost: c.w });
+        if (c.w >= 7 && c.h <= left) opts.push({ k, axis: 'v', at: Math.floor(c.w / 2), cost: c.h });
+        for (const o of opts) {
+          const dc = Math.hypot(c.x0 + c.w / 2 - CENTER, c.y0 + c.h / 2 - CENTER);
+          o.score = c.w * c.h - dc * 2;
+          if (!best || o.score > best.score) best = o;
+        }
+      });
+      if (!best) break;
+      // index shifts as cells are spliced, so record the split against the current cell list order
+      skel.splits.push({ k: best.k, axis: best.axis, at: best.at });
+      left -= best.cost;
+    }
+    if (!skel.splits.length) return null;
+    skel.walls = budget - left;
+    return skel;
   }
 
   // ---------- Grids ----------
@@ -133,6 +169,7 @@ function createOptimizer() {
         for (let y = c.y0; y < c.y0 + c.h; y++) for (let x = c.x0; x < c.x0 + c.w; x++) { st.occ[y * G + x] = -1; st.comp[y * G + x] = k; }
       });
       for (let y = box.y0; y < box.y0 + box.th; y++) for (let x = box.x0; x < box.x0 + box.tw; x++) if (st.occ[y * G + x] === -2) st.wallTiles.push([x, y]);
+      for (const [x, y] of box.extra || []) if (st.occ[y * G + x] === -1) { st.occ[y * G + x] = -2; st.wallTiles.push([x, y]); }
     }
     st.depth = new Int16Array(G * G).fill(-1);
     const q = [];
@@ -373,6 +410,7 @@ function createOptimizer() {
     let demoted = box ? pack(st, box, ins, rng) : [];
     if (strict && demoted.length) return null;
     for (const d of demoted) d.place = 'out';
+    if (box) spareWalls(st, spec);
     const failed = placeOutside(st, outs.concat(demoted), rng);
     if (failed.length) {
       if (strict) return null;
@@ -388,6 +426,30 @@ function createOptimizer() {
     st.demoted = demoted.map(d => d.name);
     finishState(st);
     return st;
+  }
+  // Spare wall pieces: a second layer two tiles out from the ring (one tile gap, so it is a separate wall to
+  // break) on the side nearest the Town Hall, centred on it. Recorded in box.extra so evaluate() rebuilds it.
+  function spareWalls(st, spec) {
+    const box = st.box; let left = spec.walls - st.wallTiles.length;
+    if (!box || left <= 0) return;
+    const th = st.items.find(i => i.role === 'th' && i.place === 'in');
+    const cx = th ? th.x + th.w / 2 : CENTER, cy = th ? th.y + th.h / 2 : CENTER;
+    const sides = [
+      { d: cy - box.y0, horiz: true, y: box.y0 - 2 }, { d: box.y0 + box.th - cy, horiz: true, y: box.y0 + box.th + 1 },
+      { d: cx - box.x0, horiz: false, x: box.x0 - 2 }, { d: box.x0 + box.tw - cx, horiz: false, x: box.x0 + box.tw + 1 },
+    ].sort((a, b) => a.d - b.d);
+    const extra = box.extra ? box.extra.slice() : [];
+    for (const sd of sides) {
+      if (left <= 0) break;
+      const len = sd.horiz ? box.tw : box.th, start = sd.horiz ? box.x0 : box.y0, centre = sd.horiz ? cx : cy;
+      const n = Math.min(left, len); let a = Math.round(centre - n / 2); a = Math.max(start, Math.min(start + len - n, a));
+      for (let i = 0; i < n; i++) {
+        const x = sd.horiz ? a + i : sd.x, y = sd.horiz ? sd.y : a + i;
+        if (x < 0 || y < 0 || x >= G || y >= G || st.occ[y * G + x] !== -1) continue;
+        st.occ[y * G + x] = -2; st.wallTiles.push([x, y]); extra.push([x, y]); left--;
+      }
+    }
+    box.extra = extra;
   }
   function finishState(st) {
     thresholds(st);
@@ -592,7 +654,7 @@ function createOptimizer() {
       if (cost < best - 1e-9) { best = cost; bestPos = snapshot(st); }
       if (report && (it & 255) === 0) {
         const now = Date.now();
-        if (now - last > 300) { last = now; report({ phase, it, iters, cost, best, positions: bestPos, skel: st.box ? { x0: st.box.x0, y0: st.box.y0, W: st.box.W, H: st.box.H, tw: st.box.tw, th: st.box.th } : null }); }
+        if (now - last > 300) { last = now; report({ phase, it, iters, cost, best, positions: bestPos, skel: st.box ? { x0: st.box.x0, y0: st.box.y0, W: st.box.W, H: st.box.H, tw: st.box.tw, th: st.box.th, splits: st.box.splits, extra: st.box.extra } : null }); }
       }
     }
     restore(st, bestPos);
@@ -773,7 +835,7 @@ function createOptimizer() {
       return o;
     });
     return {
-      skel: st.box ? { x0: st.box.x0, y0: st.box.y0, W: st.box.W, H: st.box.H, tw: st.box.tw, th: st.box.th } : null,
+      skel: st.box ? { x0: st.box.x0, y0: st.box.y0, W: st.box.W, H: st.box.H, tw: st.box.tw, th: st.box.th, splits: st.box.splits, extra: st.box.extra } : null,
       cells: st.box ? st.box.cells : [],
       walls: st.wallTiles,
       wallsUsed: st.wallTiles.length,
@@ -794,9 +856,15 @@ function createOptimizer() {
     const n4 = ins.filter(i => i.w >= 4 || i.h >= 4).length;
     let cands = spec.walls >= 8 && ins.length ? skeletons(needArea, spec.walls, 36, n4) : [];
     if (!cands.length && spec.walls >= 8 && ins.length) cands = skeletons(needArea, spec.walls, 40, n4);
+    // Too few walls to enclose everything (low Town Halls): enclose the most important part and demote the rest.
+    for (const f of [0.8, 0.65, 0.5, 0.4, 0.3]) { if (cands.length || spec.walls < 8 || !ins.length) break; cands = skeletons(Math.round(needArea * f), spec.walls, 40, Math.min(n4, 1)); }
+    // Spare pieces: a split variant of each good skeleton competes with the plain one.
+    const withVariants = [];
+    for (const sk of cands.slice(0, 6)) { withVariants.push(sk); const v = withSplits(sk, spec.walls); if (v) withVariants.push(v); }
+    cands = withVariants.concat(cands.slice(6));
     const trials = [];
     for (const sk of cands) {
-      if (trials.length >= 3) break;
+      if (trials.length >= 4) break;
       const st = newState(spec, sk, rng, true);
       if (st) trials.push(st);
     }
