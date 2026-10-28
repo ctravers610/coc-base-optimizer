@@ -6,7 +6,7 @@ Lays out a Clash of Clans Home Village for defense from your Town Hall level, bu
 - Open `index.html` in a browser (no server needed), or use the published artifact link.
 - Pick your Town Hall, choose War/Trophy, Farming or Hybrid, adjust counts and levels (blank = max for your TH; one number = all; a list like `14,14,13,12` = per building), then press **Optimize base**.
 - Drag any building on the map to tweak it; the score and notes recompute. The inventory and last layout are saved in your browser.
-- **Game view** (on by default) draws the map as the diamond you see in the game, with the dark centre tile and buildings as raised blocks, so the layout reads the same way as in the editor. Untick it for a flat top-down grid.
+- The **Game / Top-down** switch on the map picks between the diamond view you see in the game (dark centre tile, buildings as raised blocks) and a flat top-down grid. The arrow buttons next to it turn the map a quarter turn, like rotating the camera in the game. Free tiles inside the walls are dotted so empty space is easy to spot (toggle **Empty tiles**).
 - Scroll (or pinch) over the map to zoom in on a part of the base; drag empty ground to pan and double-click it (or press **Reset zoom**) to see the whole map again. Traps are drawn as bright diamonds on top of everything and show their name on hover.
 
 ## Import from a screenshot

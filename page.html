@@ -87,7 +87,13 @@
   .board { display: grid; gap: 16px; min-width: 0; }
   .map-wrap { position: relative; width: 100%; max-width: 760px; margin: 0 auto; }
   .map-wrap.iso { max-width: 980px; }
-  .zoom-reset { position: absolute; top: 8px; right: 8px; z-index: 2; font-size: 12px; padding: 4px 9px; }
+  .map-tools { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 6px; }
+  .map-tools button { font-size: 13px; padding: 4px 9px; line-height: 1.2; }
+  .map-tools .seg { display: inline-flex; }
+  .map-tools .seg button { border-radius: 0; }
+  .map-tools .seg button:first-child { border-radius: 6px 0 0 6px; }
+  .map-tools .seg button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+  .map-tools .seg button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   canvas#map { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--line); touch-action: none; cursor: crosshair; }
   .tooltip { position: absolute; pointer-events: none; background: var(--bg2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); max-width: 240px; z-index: 3; }
   .tooltip b { font-family: var(--font-display); font-size: 16px; }
@@ -197,18 +203,27 @@
   <section class="board">
     <div class="map-wrap">
       <canvas id="map" width="704" height="704" aria-label="Base layout map"></canvas>
-      <button class="zoom-reset" id="btn-zoom-reset" hidden title="Back to the whole map (or double-click empty ground)">Reset zoom</button>
+      <div class="map-tools">
+        <span class="seg" role="group" aria-label="Map view">
+          <button id="btn-view-game" class="on" title="The diamond view you see in the game">Game</button>
+          <button id="btn-view-top" title="A flat top-down grid">Top-down</button>
+        </span>
+        <button id="btn-rot-l" title="Rotate the map a quarter turn anticlockwise">&#8634;</button>
+        <button id="btn-rot-r" title="Rotate the map a quarter turn clockwise">&#8635;</button>
+        <button id="btn-zoom-reset" hidden title="Back to the whole map (or double-click empty ground)">Reset zoom</button>
+      </div>
       <div class="tooltip" id="tooltip" hidden></div>
     </div>
     <div class="toggles">
-      <label title="Rotate the grid into the diamond you see in the game, with buildings as blocks"><input type="checkbox" id="view-iso" checked> Game view</label>
+      <input type="checkbox" id="view-iso" checked hidden aria-hidden="true">
       <label><input type="checkbox" id="show-traps" checked> Traps</label>
+      <label title="Dot every free tile inside the walls"><input type="checkbox" id="show-empty" checked> Empty tiles</label>
       <label><input type="checkbox" id="show-heat"> Coverage heat (red = thin ground coverage)</label>
       <label><input type="checkbox" id="show-ranges"> All defense ranges</label>
       <label><input type="checkbox" id="show-labels" checked> Labels</label>
     </div>
     <div class="legend" id="legend"></div>
-    <p class="hint">Scroll (or pinch) over the map to zoom. When zoomed in, drag empty ground to pan and double-click it to zoom back out.</p>
+    <p class="hint">Scroll (or pinch) over the map to zoom; when zoomed in, drag empty ground to pan and double-click it to zoom back out. The arrow buttons turn the map a quarter turn, as you can in the game.</p>
 
     <div class="readouts">
       <section class="panel" aria-labelledby="score-h">
@@ -243,8 +258,8 @@
 </main>
 <div class="toast" id="toast" role="status"></div>
 
-<script src="data.js"></script>
-<script src="optimizer.js"></script>
+<script src="data.js?v=20261028b"></script>
+<script src="optimizer.js?v=20261028b"></script>
 <script>
 (function () {
   'use strict';
@@ -475,7 +490,12 @@
   const VIEW_KEY = 'clash-base-optimizer:view';
   let hover = -1, hoverTrap = -1, drag = null;
   // zoom and pan, in canvas px: a base point b maps to b * Z + V
-  const view = { Z: 1, VX: 0, VY: 0 };
+  const view = { Z: 1, VX: 0, VY: 0, rot: 0 };   // rot: quarter turns clockwise
+  const ROT_KEY = 'clash-base-optimizer:rot';
+  // rotate grid coordinates a quarter turn at a time around the map centre
+  function R(x, y) { switch (view.rot & 3) { case 1: return [G - y, x]; case 2: return [G - x, G - y]; case 3: return [y, G - x]; default: return [x, y]; } }
+  function unR(x, y) { switch (view.rot & 3) { case 1: return [y, G - x]; case 2: return [G - x, G - y]; case 3: return [G - y, x]; default: return [x, y]; } }
+  function depth(x, y) { const [rx, ry] = R(x, y); return rx + ry; }
   const ZMIN = 1, ZMAX = 6;
   let pan = null;                // {cx, cy, VX, VY} while dragging empty ground
   const pointers = new Map();    // active pointers, for pinch zoom
@@ -485,15 +505,16 @@
   function canvasSize() { return isoOn() ? [G * IW * 2 + PAD * 2, G * IH * 2 + PAD * 2 + ISO_TOP] : [G * T + PAD * 2, G * T + PAD * 2]; }
   // grid coordinates (may be fractional) -> canvas px
   function P(x, y) {
+    [x, y] = R(x, y);
     const b = isoOn() ? [PAD + G * IW + (x - y) * IW, PAD + ISO_TOP + (x + y) * IH] : [PAD + x * T, PAD + y * T];
     return [b[0] * view.Z + view.VX, b[1] * view.Z + view.VY];
   }
   // canvas px -> fractional grid coordinates
   function unP(px, py) {
     px = (px - view.VX) / view.Z; py = (py - view.VY) / view.Z;
-    if (!isoOn()) return [(px - PAD) / T, (py - PAD) / T];
+    if (!isoOn()) return unR((px - PAD) / T, (py - PAD) / T);
     const u = (px - PAD - G * IW) / IW, v = (py - PAD - ISO_TOP) / IH;
-    return [(u + v) / 2, (v - u) / 2];
+    return unR((u + v) / 2, (v - u) / 2);
   }
   function clampView() {
     const [W, H] = canvasSize();
@@ -510,7 +531,7 @@
   function resetZoom() { view.Z = 1; view.VX = 0; view.VY = 0; clampView(); render(); }
   function poly(pts) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); }
   function quad(x, y, w, h, dy = 0) { return [P(x, y), P(x + w, y), P(x + w, y + h), P(x, y + h)].map(([a, b]) => [a, b - dy]); }
-  function heightOf(it) { return isoOn() ? Math.round(IH * (1 + 0.8 * Math.min(it.w, it.h)) * view.Z) : 0; }
+  function heightOf(it) { return isoOn() ? Math.round(IH * (0.9 + 0.6 * Math.min(it.w, it.h)) * view.Z) : 0; }
   function shade(c, f) {
     const m = /^#([0-9a-f]{6})$/i.exec(c); if (!m) return c;
     const n = parseInt(m[1], 16), ch = (s) => clamp(Math.round(((n >> s) & 255) * f), 0, 255);
@@ -547,6 +568,22 @@
     // compartment interiors
     ctx.fillStyle = 'rgba(255,255,255,0.10)';
     for (const c of cells) { poly(quad(c.x0, c.y0, c.w, c.h)); ctx.fill(); }
+    // faint tile grid
+    ctx.strokeStyle = 'rgba(0,0,0,0.10)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i = 0; i <= G; i++) { const [ax, ay] = P(i, 0), [bx, by] = P(i, G), [cx2, cy2] = P(0, i), [dx, dy] = P(G, i); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.moveTo(cx2, cy2); ctx.lineTo(dx, dy); }
+    ctx.stroke();
+    // empty tiles inside the walls get a dot so free space stands out among the blocks
+    if ($('show-empty').checked && cells.length) {
+      const occ = new Uint8Array(G * G);
+      for (const [x, y] of walls) occ[y * G + x] = 1;
+      for (const it of items) for (let j = it.y; j < it.y + it.h; j++) for (let i = it.x; i < it.x + it.w; i++) occ[j * G + i] = 1;
+      if (result && !live) for (const tr of result.traps) for (let j = tr.y; j < tr.y + tr.h; j++) for (let i = tr.x; i < tr.x + tr.w; i++) occ[j * G + i] = 1;
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      const rr = (isoOn() ? 1.7 : 2.2) * view.Z;
+      for (const c of cells) for (let j = c.y0; j < c.y0 + c.h; j++) for (let i = c.x0; i < c.x0 + c.w; i++) if (!occ[j * G + i]) {
+        const [cx, cy] = P(i + 0.5, j + 0.5); ctx.beginPath(); ctx.ellipse(cx, cy, rr, isoOn() ? rr * 0.6 : rr, 0, 0, Math.PI * 2); ctx.fill();
+      }
+    }
     // heat
     if ($('show-heat').checked && result && !live) {
       const Tg = result.thresholds.ground || 1;
@@ -561,8 +598,8 @@
     const showLabels = $('show-labels').checked;
     // walls and buildings: in the game view draw back to front so nearer blocks cover farther ones
     const objs = [];
-    for (const [x, y] of walls) objs.push({ wall: true, x, y, w: 1, h: 1, d: x + y + 1 });
-    items.forEach((it, k) => { if (!(drag && drag.idx === k)) objs.push({ it, k, x: it.x, y: it.y, w: it.w, h: it.h, d: it.x + it.w / 2 + it.y + it.h / 2 }); });
+    for (const [x, y] of walls) objs.push({ wall: true, x, y, w: 1, h: 1, d: depth(x + 0.5, y + 0.5) });
+    items.forEach((it, k) => { if (!(drag && drag.idx === k)) objs.push({ it, k, x: it.x, y: it.y, w: it.w, h: it.h, d: depth(it.x + it.w / 2, it.y + it.h / 2) }); });
     if (isoOn()) objs.sort((a, b) => a.d - b.d || a.w - b.w);
     else objs.sort((a, b) => (a.wall ? 0 : 1) - (b.wall ? 0 : 1));
     for (const o of objs) {
@@ -617,25 +654,38 @@
     if (strong) { ctx.fillStyle = color.replace('0.9', '0.08'); rangeEllipse(it, R); ctx.fill(); }
   }
   // A block standing on footprint (x,y,w,h), `hgt` px tall, drawn as top face plus two side faces.
+  // Corners of a footprint quad reordered so index 0 is the lowest point on screen (the front corner);
+  // 1 and 3 are its neighbours, 2 is the back corner.
+  function frontOrder(q) {
+    let ib = 0; for (let i = 1; i < 4; i++) if (q[i][1] > q[ib][1]) ib = i;
+    return [q[ib], q[(ib + 1) & 3], q[(ib + 2) & 3], q[(ib + 3) & 3]];
+  }
+  function silhouette(q, hgt) {
+    const [f, n1, bk, n3] = frontOrder(q), up = (p) => [p[0], p[1] - hgt];
+    return [up(n3), up(bk), up(n1), n1, f, n3];
+  }
+  function bbox(q) { const xs = q.map(p => p[0]), ys = q.map(p => p[1]); const x0 = Math.min(...xs), y0 = Math.min(...ys); return [x0, y0, Math.max(...xs) - x0, Math.max(...ys) - y0]; }
   function drawBlock(x, y, w, h, hgt, color, inset, outline, lw) {
-    const [a, b, c, d] = quad(x + inset, y + inset, w - 2 * inset, h - 2 * inset);
+    const q = quad(x + inset, y + inset, w - 2 * inset, h - 2 * inset);
     const up = (p) => [p[0], p[1] - hgt];
     if (hgt > 0) {
+      const [f, n1, bk, n3] = frontOrder(q);
+      const leftFirst = n3[0] < n1[0], L = leftFirst ? n3 : n1, Rt = leftFirst ? n1 : n3;
       ctx.lineJoin = 'round';
-      ctx.fillStyle = shade(color, 0.62); poly([d, c, up(c), up(d)]); ctx.fill();   // left face (toward +y)
-      ctx.fillStyle = shade(color, 0.78); poly([b, c, up(c), up(b)]); ctx.fill();   // right face (toward +x)
-      ctx.fillStyle = color; poly([a, b, c, d].map(up)); ctx.fill();
-      ctx.strokeStyle = outline; ctx.lineWidth = lw; poly([up(a), up(b), b, c, d, up(d)]); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(...up(b)); ctx.lineTo(...up(c)); ctx.lineTo(...up(d)); ctx.moveTo(...up(c)); ctx.lineTo(...c); ctx.stroke(); ctx.lineWidth = 1;
+      ctx.fillStyle = shade(color, 0.62); poly([L, f, up(f), up(L)]); ctx.fill();    // left face
+      ctx.fillStyle = shade(color, 0.78); poly([Rt, f, up(f), up(Rt)]); ctx.fill();  // right face
+      ctx.fillStyle = color; poly([f, n1, bk, n3].map(up)); ctx.fill();
+      ctx.strokeStyle = outline; ctx.lineWidth = lw; poly(silhouette(q, hgt)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(...up(n1)); ctx.lineTo(...up(f)); ctx.lineTo(...up(n3)); ctx.moveTo(...up(f)); ctx.lineTo(...f); ctx.stroke(); ctx.lineWidth = 1;
     } else {
       ctx.fillStyle = color;
-      if (isoOn()) { poly([a, b, c, d]); ctx.fill(); ctx.strokeStyle = outline; ctx.lineWidth = lw; ctx.stroke(); ctx.lineWidth = 1; }
-      else { roundRect(a[0], a[1], c[0] - a[0], c[1] - a[1], 4); ctx.fill(); ctx.strokeStyle = outline; ctx.lineWidth = lw; roundRect(a[0], a[1], c[0] - a[0], c[1] - a[1], 4); ctx.stroke(); ctx.lineWidth = 1; }
+      if (isoOn()) { poly(q); ctx.fill(); ctx.strokeStyle = outline; ctx.lineWidth = lw; ctx.stroke(); ctx.lineWidth = 1; }
+      else { const [bx, by, bw, bh] = bbox(q); roundRect(bx, by, bw, bh, 4); ctx.fill(); ctx.strokeStyle = outline; ctx.lineWidth = lw; roundRect(bx, by, bw, bh, 4); ctx.stroke(); ctx.lineWidth = 1; }
     }
   }
   function drawWall(x, y, stone) {
     if (isoOn()) drawBlock(x, y, 1, 1, 6 * view.Z, stone, 0.12, 'rgba(0,0,0,0.3)', 1);
-    else { const [a, , c] = quad(x, y, 1, 1), i = view.Z; ctx.fillStyle = stone; ctx.fillRect(a[0] + i, a[1] + i, c[0] - a[0] - 2 * i, c[1] - a[1] - 2 * i); }
+    else { const [bx, by, bw, bh] = bbox(quad(x, y, 1, 1)), i = view.Z; ctx.fillStyle = stone; ctx.fillRect(bx + i, by + i, bw - 2 * i, bh - 2 * i); }
   }
   function drawItem(it, hl, showLabels, fg) {
     const hgt = heightOf(it), color = colorOf(it);
@@ -678,10 +728,10 @@
       return -1;
     }
     const [px, py] = canvasPoint(ev);
-    const order = items.map((it, k) => [it.x + it.w / 2 + it.y + it.h / 2, k]).sort((a, b) => b[0] - a[0]); // nearest first
+    const order = items.map((it, k) => [depth(it.x + it.w / 2, it.y + it.h / 2), k]).sort((a, b) => b[0] - a[0]); // nearest first
     for (const [, k] of order) {
-      const it = items[k], hgt = heightOf(it), [a, b, c, d] = quad(it.x, it.y, it.w, it.h);
-      if (inPoly(px, py, [[a[0], a[1] - hgt], [b[0], b[1] - hgt], b, c, d, [d[0], d[1] - hgt]])) return k;
+      const it = items[k];
+      if (inPoly(px, py, silhouette(quad(it.x, it.y, it.w, it.h), heightOf(it)))) return k;
     }
     return -1;
   }
@@ -1044,9 +1094,17 @@ Reply with only a JSON object of this exact shape and nothing else:
   $('btn-opt').addEventListener('click', startOptimize);
   $('btn-stop').addEventListener('click', () => stopOptimize(true));
   $('btn-reset').addEventListener('click', () => { inv.rows = {}; inv.traps = {}; inv.walls = {}; inv.thWeaponLv = null; buildInventory(); save(); toast('Counts and levels reset to the Town Hall maximum.'); });
-  ['show-traps', 'show-heat', 'show-ranges', 'show-labels'].forEach(id => $(id).addEventListener('change', render));
+  ['show-traps', 'show-heat', 'show-ranges', 'show-labels', 'show-empty'].forEach(id => $(id).addEventListener('change', render));
+  try { view.rot = (parseInt(localStorage.getItem(ROT_KEY), 10) || 0) & 3; } catch (e) { /* storage unavailable */ }
+  function rotate(dir) { view.rot = (view.rot + dir + 4) & 3; try { localStorage.setItem(ROT_KEY, String(view.rot)); } catch (e) { /* ignore */ } hover = -1; hoverTrap = -1; render(); }
+  $('btn-rot-l').addEventListener('click', () => rotate(-1));
+  $('btn-rot-r').addEventListener('click', () => rotate(1));
   try { if (localStorage.getItem(VIEW_KEY) === 'top') $('view-iso').checked = false; } catch (e) { /* storage unavailable */ }
-  $('view-iso').addEventListener('change', () => { try { localStorage.setItem(VIEW_KEY, isoOn() ? 'game' : 'top'); } catch (e) { /* ignore */ } hover = -1; resetZoom(); });
+  function syncViewButtons() { $('btn-view-game').classList.toggle('on', isoOn()); $('btn-view-top').classList.toggle('on', !isoOn()); }
+  $('btn-view-game').addEventListener('click', () => { if (!isoOn()) { $('view-iso').checked = true; $('view-iso').dispatchEvent(new Event('change')); } });
+  $('btn-view-top').addEventListener('click', () => { if (isoOn()) { $('view-iso').checked = false; $('view-iso').dispatchEvent(new Event('change')); } });
+  syncViewButtons();
+  $('view-iso').addEventListener('change', () => { syncViewButtons(); try { localStorage.setItem(VIEW_KEY, isoOn() ? 'game' : 'top'); } catch (e) { /* ignore */ } hover = -1; resetZoom(); });
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
   new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
