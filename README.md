@@ -6,6 +6,7 @@ Lays out a Clash of Clans Home Village for defense from your Town Hall level, bu
 - Open `index.html` in a browser (no server needed), or use the published artifact link.
 - Pick your Town Hall, choose War/Trophy, Farming or Hybrid, adjust counts and levels (blank = max for your TH; one number = all; a list like `14,14,13,12` = per building), then press **Optimize base**.
 - Drag any building on the map to tweak it; the score and notes recompute. The inventory and last layout are saved in your browser.
+- **Game view** (on by default) draws the map as the diamond you see in the game, with the dark centre tile and buildings as raised blocks, so the layout reads the same way as in the editor. Untick it for a flat top-down grid.
 
 ## Import from a screenshot
 Upload up to four screenshots of your village and press **Read screenshots**. Claude counts the buildings and estimates levels from their appearance, then fills in the inventory for you to check (level numbers are not shown in a base screenshot, so treat levels as a starting point).

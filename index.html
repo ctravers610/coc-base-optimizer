@@ -93,6 +93,7 @@
   .inv-wrap { max-height: 70vh; overflow: auto; margin: 0 -6px; padding: 0 6px; }
   .board { display: grid; gap: 16px; min-width: 0; }
   .map-wrap { position: relative; width: 100%; max-width: 760px; margin: 0 auto; }
+  .map-wrap.iso { max-width: 980px; }
   canvas#map { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--line); touch-action: none; cursor: crosshair; }
   .tooltip { position: absolute; pointer-events: none; background: var(--bg2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); max-width: 240px; z-index: 3; }
   .tooltip b { font-family: var(--font-display); font-size: 16px; }
@@ -205,6 +206,7 @@
       <div class="tooltip" id="tooltip" hidden></div>
     </div>
     <div class="toggles">
+      <label title="Rotate the grid into the diamond you see in the game, with buildings as blocks"><input type="checkbox" id="view-iso" checked> Game view</label>
       <label><input type="checkbox" id="show-traps" checked> Traps</label>
       <label><input type="checkbox" id="show-heat"> Coverage heat (red = thin ground coverage)</label>
       <label><input type="checkbox" id="show-ranges"> All defense ranges</label>
@@ -468,10 +470,36 @@
   function setProgress(p) { $('progress').style.width = clamp(p, 0, 100) + '%'; }
 
   // ---------- rendering ----------
+  // Two views share one grid: "game" draws the 44x44 grid as the diamond you see in Clash of Clans
+  // (45 degree rotation, 2:1 tiles, buildings as raised blocks); "top" is a plain top-down grid.
   const canvas = $('map'), ctx = canvas.getContext('2d');
-  const PAD = 8, T = 16; // tile px at base resolution
-  const BASE = G * T + PAD * 2;
+  const PAD = 8, T = 16;        // top-down: tile px at base resolution
+  const IW = 10, IH = 5;        // game view: half width / half height of one tile diamond
+  const ISO_TOP = 34;           // head room above the diamond for the tallest buildings
+  const VIEW_KEY = 'clash-base-optimizer:view';
   let hover = -1, drag = null;
+
+  function isoOn() { return $('view-iso').checked; }
+  function canvasSize() { return isoOn() ? [G * IW * 2 + PAD * 2, G * IH * 2 + PAD * 2 + ISO_TOP] : [G * T + PAD * 2, G * T + PAD * 2]; }
+  // grid coordinates (may be fractional) -> canvas px
+  function P(x, y) {
+    if (!isoOn()) return [PAD + x * T, PAD + y * T];
+    return [PAD + G * IW + (x - y) * IW, PAD + ISO_TOP + (x + y) * IH];
+  }
+  // canvas px -> fractional grid coordinates
+  function unP(px, py) {
+    if (!isoOn()) return [(px - PAD) / T, (py - PAD) / T];
+    const u = (px - PAD - G * IW) / IW, v = (py - PAD - ISO_TOP) / IH;
+    return [(u + v) / 2, (v - u) / 2];
+  }
+  function poly(pts) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); }
+  function quad(x, y, w, h, dy = 0) { return [P(x, y), P(x + w, y), P(x + w, y + h), P(x, y + h)].map(([a, b]) => [a, b - dy]); }
+  function heightOf(it) { return isoOn() ? Math.round(IH * (1 + 0.8 * Math.min(it.w, it.h))) : 0; }
+  function shade(c, f) {
+    const m = /^#([0-9a-f]{6})$/i.exec(c); if (!m) return c;
+    const n = parseInt(m[1], 16), ch = (s) => clamp(Math.round(((n >> s) & 255) * f), 0, 255);
+    return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+  }
 
   function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
   function currentItems() {
@@ -483,52 +511,58 @@
     return result ? result.walls : [];
   }
   function render() {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    if (canvas.width !== BASE * dpr) { canvas.width = BASE * dpr; canvas.height = BASE * dpr; }
+    const dpr = Math.min(2, window.devicePixelRatio || 1), [W, H] = canvasSize();
+    if (canvas.width !== W * dpr || canvas.height !== H * dpr) { canvas.width = W * dpr; canvas.height = H * dpr; }
+    canvas.parentElement.classList.toggle('iso', isoOn());
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, BASE, BASE);
+    ctx.clearRect(0, 0, W, H);
     const grass = cssVar('--grass') || '#8fb86a', grass2 = cssVar('--grass2') || '#86ad60', outside = cssVar('--outside') || '#a3c182', stone = cssVar('--stone') || '#5b5f66', fg = cssVar('--fg') || '#222';
-    ctx.fillStyle = outside; ctx.fillRect(0, 0, BASE, BASE);
+    ctx.fillStyle = outside; ctx.fillRect(0, 0, W, H);
     // tiles
     for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
       ctx.fillStyle = (x + y) % 2 ? grass : grass2;
-      ctx.fillRect(PAD + x * T, PAD + y * T, T, T);
+      poly(quad(x, y, 1, 1)); ctx.fill();
     }
+    // the game marks the centre tile of the map with a dark tile
+    ctx.fillStyle = 'rgba(0,0,0,0.78)'; poly(quad(G / 2 - 1, G / 2 - 1, 1, 1)); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; poly(quad(0, 0, G, G)); ctx.stroke();
     const items = currentItems(), walls = currentWalls();
     const cells = result && !live ? result.cells : (live && live.skel ? cellsFromSkel(live.skel) : []);
     // compartment interiors
     ctx.fillStyle = 'rgba(255,255,255,0.10)';
-    for (const c of cells) ctx.fillRect(PAD + c.x0 * T, PAD + c.y0 * T, c.w * T, c.h * T);
+    for (const c of cells) { poly(quad(c.x0, c.y0, c.w, c.h)); ctx.fill(); }
     // heat
     if ($('show-heat').checked && result && !live) {
       const Tg = result.thresholds.ground || 1;
       for (let t = 0; t < G * G; t++) {
         const v = result.covG[t] / Tg;
-        if (v < 1) { ctx.fillStyle = `rgba(200,40,30,${(1 - v) * 0.45})`; ctx.fillRect(PAD + (t % G) * T, PAD + Math.floor(t / G) * T, T, T); }
+        if (v < 1) { ctx.fillStyle = `rgba(200,40,30,${(1 - v) * 0.45})`; poly(quad(t % G, Math.floor(t / G), 1, 1)); ctx.fill(); }
       }
     }
-    // walls
-    ctx.fillStyle = stone;
-    for (const [x, y] of walls) ctx.fillRect(PAD + x * T + 1, PAD + y * T + 1, T - 2, T - 2);
     // ranges
     const showRanges = $('show-ranges').checked;
-    ctx.lineWidth = 1;
     if (showRanges) for (const it of items) if (it.isDef && it.range && it.range < 40) drawRange(it, 'rgba(255,255,255,0.35)');
-    // buildings
+    // traps lie flat on the ground
     const showLabels = $('show-labels').checked;
-    items.forEach((it, k) => {
-      if (drag && drag.idx === k) return;
-      drawItem(it, k === hover, showLabels, fg);
-    });
-    // traps
     if ($('show-traps').checked && result && !live) {
       for (const tr of result.traps) {
-        const cx = PAD + (tr.x + tr.w / 2) * T, cy = PAD + (tr.y + tr.h / 2) * T, r = tr.w === 2 ? T * 0.75 : T * 0.36;
-        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        const [cx, cy] = P(tr.x + tr.w / 2, tr.y + tr.h / 2);
+        const r = isoOn() ? (tr.w === 2 ? IW * 1.3 : IW * 0.62) : (tr.w === 2 ? T * 0.75 : T * 0.36);
+        ctx.beginPath(); ctx.ellipse(cx, cy, r, isoOn() ? r / 2 : r, 0, 0, Math.PI * 2);
         ctx.fillStyle = TRAP_COLORS[tr.target] || '#555'; ctx.fill();
         ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.stroke();
-        if (showLabels) { ctx.fillStyle = '#fff'; ctx.font = `600 ${tr.w === 2 ? 11 : 8}px ${cssVar('--font-mono')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(tr.short, cx, cy + 0.5); }
+        if (showLabels) { ctx.fillStyle = '#fff'; ctx.font = `600 ${tr.w === 2 ? (isoOn() ? 9 : 11) : 8}px ${cssVar('--font-mono')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(tr.short, cx, cy + 0.5); }
       }
+    }
+    // walls and buildings: in the game view draw back to front so nearer blocks cover farther ones
+    const objs = [];
+    for (const [x, y] of walls) objs.push({ wall: true, x, y, w: 1, h: 1, d: x + y + 1 });
+    items.forEach((it, k) => { if (!(drag && drag.idx === k)) objs.push({ it, k, x: it.x, y: it.y, w: it.w, h: it.h, d: it.x + it.w / 2 + it.y + it.h / 2 }); });
+    if (isoOn()) objs.sort((a, b) => a.d - b.d || a.w - b.w);
+    else objs.sort((a, b) => (a.wall ? 0 : 1) - (b.wall ? 0 : 1));
+    for (const o of objs) {
+      if (o.wall) drawWall(o.x, o.y, stone);
+      else drawItem(o.it, o.k === hover, showLabels, fg);
     }
     // hover range
     if (hover >= 0 && items[hover] && items[hover].isDef && items[hover].range) drawRange(items[hover], 'rgba(255,255,255,0.9)', true);
@@ -545,48 +579,91 @@
     for (const h of skel.H) { let cx = skel.x0 + 1; for (const w of skel.W) { cells.push({ x0: cx, y0: cy, w, h }); cx += w + 1; } cy += h + 1; }
     return cells;
   }
+  function rangeEllipse(it, r) {
+    const [cx, cy] = P(it.x + it.w / 2, it.y + it.h / 2);
+    ctx.beginPath();
+    if (isoOn()) ctx.ellipse(cx, cy, r * Math.SQRT2 * IW, r * Math.SQRT2 * IH, 0, 0, Math.PI * 2);
+    else ctx.arc(cx, cy, r * T, 0, Math.PI * 2);
+  }
   function drawRange(it, color, strong) {
-    const cx = PAD + (it.x + it.w / 2) * T, cy = PAD + (it.y + it.h / 2) * T;
+    const R = Math.min(it.range, 40);
     ctx.strokeStyle = color; ctx.lineWidth = strong ? 2 : 1;
     ctx.setLineDash(strong ? [] : [3, 4]);
-    ctx.beginPath(); ctx.arc(cx, cy, Math.min(it.range, 40) * T, 0, Math.PI * 2); ctx.stroke();
-    if (it.minRange) { ctx.beginPath(); ctx.arc(cx, cy, it.minRange * T, 0, Math.PI * 2); ctx.stroke(); }
+    rangeEllipse(it, R); ctx.stroke();
+    if (it.minRange) { rangeEllipse(it, it.minRange); ctx.stroke(); }
     ctx.setLineDash([]); ctx.lineWidth = 1;
-    if (strong) { ctx.fillStyle = color.replace('0.9', '0.08'); ctx.beginPath(); ctx.arc(cx, cy, Math.min(it.range, 40) * T, 0, Math.PI * 2); ctx.fill(); }
+    if (strong) { ctx.fillStyle = color.replace('0.9', '0.08'); rangeEllipse(it, R); ctx.fill(); }
+  }
+  // A block standing on footprint (x,y,w,h), `hgt` px tall, drawn as top face plus two side faces.
+  function drawBlock(x, y, w, h, hgt, color, inset, outline, lw) {
+    const [a, b, c, d] = quad(x + inset, y + inset, w - 2 * inset, h - 2 * inset);
+    const up = (p) => [p[0], p[1] - hgt];
+    if (hgt > 0) {
+      ctx.fillStyle = shade(color, 0.62); poly([d, c, up(c), up(d)]); ctx.fill();   // left face (toward +y)
+      ctx.fillStyle = shade(color, 0.78); poly([b, c, up(c), up(b)]); ctx.fill();   // right face (toward +x)
+      ctx.fillStyle = color; poly([a, b, c, d].map(up)); ctx.fill();
+      ctx.strokeStyle = outline; ctx.lineWidth = lw; poly([up(a), up(b), b, c, d, up(d)]); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(...up(b)); ctx.lineTo(...up(c)); ctx.lineTo(...up(d)); ctx.moveTo(...up(c)); ctx.lineTo(...c); ctx.stroke(); ctx.lineWidth = 1;
+    } else {
+      ctx.fillStyle = color;
+      if (isoOn()) { poly([a, b, c, d]); ctx.fill(); ctx.strokeStyle = outline; ctx.lineWidth = lw; ctx.stroke(); ctx.lineWidth = 1; }
+      else { roundRect(a[0], a[1], c[0] - a[0], c[1] - a[1], 4); ctx.fill(); ctx.strokeStyle = outline; ctx.lineWidth = lw; roundRect(a[0], a[1], c[0] - a[0], c[1] - a[1], 4); ctx.stroke(); ctx.lineWidth = 1; }
+    }
+  }
+  function drawWall(x, y, stone) {
+    if (isoOn()) drawBlock(x, y, 1, 1, 6, stone, 0.12, 'rgba(0,0,0,0.3)', 1);
+    else { ctx.fillStyle = stone; ctx.fillRect(PAD + x * T + 1, PAD + y * T + 1, T - 2, T - 2); }
   }
   function drawItem(it, hl, showLabels, fg) {
-    const x = PAD + it.x * T, y = PAD + it.y * T, w = it.w * T, h = it.h * T;
-    ctx.fillStyle = colorOf(it);
-    roundRect(x + 1.5, y + 1.5, w - 3, h - 3, 4); ctx.fill();
-    ctx.strokeStyle = hl ? '#fff' : 'rgba(0,0,0,0.35)'; ctx.lineWidth = hl ? 2.5 : 1; roundRect(x + 1.5, y + 1.5, w - 3, h - 3, 4); ctx.stroke(); ctx.lineWidth = 1;
+    const hgt = heightOf(it), color = colorOf(it);
+    drawBlock(it.x, it.y, it.w, it.h, hgt, color, isoOn() ? 0.1 : 1.5 / T, hl ? '#fff' : 'rgba(0,0,0,0.35)', hl ? 2.5 : 1);
+    const [cx, cy0] = P(it.x + it.w / 2, it.y + it.h / 2), cy = cy0 - hgt;
     if (it.id === 'air-sweeper' && typeof it.dir === 'number') {
-      const cx = x + w / 2, cy = y + h / 2;
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(it.dir) * T * 1.4, cy + Math.sin(it.dir) * T * 1.4); ctx.stroke(); ctx.lineWidth = 1;
+      const [ex, ey] = P(it.x + it.w / 2 + Math.cos(it.dir) * 1.4, it.y + it.h / 2 + Math.sin(it.dir) * 1.4);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey - hgt); ctx.stroke(); ctx.lineWidth = 1;
     }
     if (!showLabels) return;
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const big = it.w >= 3;
-    ctx.font = `700 ${big ? 12 : 10}px ${cssVar('--font-display')}`;
-    ctx.fillText(it.short, x + w / 2, y + h / 2 - (big ? 5 : 3));
-    if (it.lv && it.id !== 'hero-banner') { ctx.font = `600 ${big ? 10 : 8}px ${cssVar('--font-mono')}`; ctx.fillText(String(it.lv), x + w / 2, y + h / 2 + (big ? 7 : 5)); }
+    const big = it.w >= 3, iso = isoOn();
+    ctx.font = `700 ${big ? (iso ? 11 : 12) : (iso ? 9 : 10)}px ${cssVar('--font-display')}`;
+    ctx.fillText(it.short, cx, cy - (big ? 5 : 3));
+    if (it.lv && it.id !== 'hero-banner') { ctx.font = `600 ${big ? (iso ? 9 : 10) : 8}px ${cssVar('--font-mono')}`; ctx.fillText(String(it.lv), cx, cy + (big ? 6 : 5)); }
   }
   function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
 
   // ---------- pointer: hover + drag ----------
-  function tileAt(ev) {
-    const r = canvas.getBoundingClientRect(), sx = BASE / r.width;
-    const px = (ev.clientX - r.left) * sx - PAD, py = (ev.clientY - r.top) * sx - PAD;
-    return [Math.floor(px / T), Math.floor(py / T)];
+  function canvasPoint(ev) {
+    const r = canvas.getBoundingClientRect(), s = canvasSize()[0] / r.width;
+    return [(ev.clientX - r.left) * s, (ev.clientY - r.top) * s];
   }
-  function itemAt(tx, ty) {
+  function tileAt(ev) { const [gx, gy] = unP(...canvasPoint(ev)); return [Math.floor(gx), Math.floor(gy)]; }
+  function inPoly(px, py, pts) {
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const [xi, yi] = pts[i], [xj, yj] = pts[j];
+      if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  // Which building is under the pointer: by tile in the top view, by the block's silhouette in the game view.
+  function itemAtEv(ev) {
     const items = currentItems();
-    for (let k = items.length - 1; k >= 0; k--) { const it = items[k]; if (tx >= it.x && tx < it.x + it.w && ty >= it.y && ty < it.y + it.h) return k; }
+    if (!isoOn()) {
+      const [tx, ty] = tileAt(ev);
+      for (let k = items.length - 1; k >= 0; k--) { const it = items[k]; if (tx >= it.x && tx < it.x + it.w && ty >= it.y && ty < it.y + it.h) return k; }
+      return -1;
+    }
+    const [px, py] = canvasPoint(ev);
+    const order = items.map((it, k) => [it.x + it.w / 2 + it.y + it.h / 2, k]).sort((a, b) => b[0] - a[0]); // nearest first
+    for (const [, k] of order) {
+      const it = items[k], hgt = heightOf(it), [a, b, c, d] = quad(it.x, it.y, it.w, it.h);
+      if (inPoly(px, py, [[a[0], a[1] - hgt], [b[0], b[1] - hgt], b, c, d, [d[0], d[1] - hgt]])) return k;
+    }
     return -1;
   }
   canvas.addEventListener('pointermove', (ev) => {
-    const [tx, ty] = tileAt(ev);
-    if (drag) { drag.gx = clamp(tx - drag.dx, 0, G - drag.w); drag.gy = clamp(ty - drag.dy, 0, G - drag.h); render(); return; }
-    const k = itemAt(tx, ty);
+    if (drag) { const [tx, ty] = tileAt(ev); drag.gx = clamp(tx - drag.dx, 0, G - drag.w); drag.gy = clamp(ty - drag.dy, 0, G - drag.h); render(); return; }
+    const k = itemAtEv(ev);
     if (k !== hover) { hover = k; render(); }
     const tip = $('tooltip');
     if (k >= 0) {
@@ -603,9 +680,9 @@
   canvas.addEventListener('pointerleave', () => { hover = -1; $('tooltip').hidden = true; render(); });
   canvas.addEventListener('pointerdown', (ev) => {
     if (!result || live || worker) return;
-    const [tx, ty] = tileAt(ev), k = itemAt(tx, ty);
+    const k = itemAtEv(ev);
     if (k < 0) return;
-    const it = result.items[k];
+    const it = result.items[k], [tx, ty] = tileAt(ev);
     drag = { idx: k, dx: tx - it.x, dy: ty - it.y, w: it.w, h: it.h, gx: it.x, gy: it.y };
     canvas.setPointerCapture(ev.pointerId);
     $('tooltip').hidden = true;
@@ -890,6 +967,8 @@ Reply with only a JSON object of this exact shape and nothing else:
   $('btn-stop').addEventListener('click', () => stopOptimize(true));
   $('btn-reset').addEventListener('click', () => { inv.rows = {}; inv.traps = {}; inv.walls = {}; inv.thWeaponLv = null; buildInventory(); save(); toast('Counts and levels reset to the Town Hall maximum.'); });
   ['show-traps', 'show-heat', 'show-ranges', 'show-labels'].forEach(id => $(id).addEventListener('change', render));
+  try { if (localStorage.getItem(VIEW_KEY) === 'top') $('view-iso').checked = false; } catch (e) { /* storage unavailable */ }
+  $('view-iso').addEventListener('change', () => { try { localStorage.setItem(VIEW_KEY, isoOn() ? 'game' : 'top'); } catch (e) { /* ignore */ } hover = -1; render(); });
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
   new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 

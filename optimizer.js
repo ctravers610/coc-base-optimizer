@@ -826,7 +826,9 @@ function createOptimizer() {
     initGrids(st, box);
     if (!box) for (const it of st.items) it.place = 'out';
     const byKey = new Map(layout.items.map((l, k) => [k, l]));
-    for (let k = 0; k < st.items.length; k++) {
+    // Place the moved building last so an overlap it causes is reported as an overlap, not a stale layout.
+    const order = st.items.map((_, k) => k).filter(k => k !== movedIdx); if (movedIdx >= 0 && movedIdx < st.items.length) order.push(movedIdx);
+    for (const k of order) {
       const it = st.items[k], l = byKey.get(k);
       if (!l) return { error: 'Layout does not match the inventory. Run the optimizer again.' };
       it.place = l.place;
