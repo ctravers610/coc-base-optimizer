@@ -1,0 +1,708 @@
+<title>Clash Base Optimizer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  /* Layout: a war-table. Controls rail on the left, the 44x44 map and its readouts on the right. */
+  :root {
+    --bg: #edf1e8;
+    --bg2: #f8faf5;
+    --bg3: #e1e7da;
+    --fg: #1c261f;
+    --muted: #5f6d63;
+    --line: #c9d3c4;
+    --accent: #2d7a58;
+    --accent-ink: #ffffff;
+    --gold: #b9841f;
+    --danger: #b4463b;
+    --grass: #8fb86a;
+    --grass2: #86ad60;
+    --outside: #a3c182;
+    --stone: #5b5f66;
+    --font-display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
+    --font-body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121713; --bg2: #1a211b; --bg3: #222b24; --fg: #e4eadf; --muted: #98a69b; --line: #2f3a31;
+      --accent: #5fc291; --accent-ink: #0f1a13; --gold: #e0ad4a; --danger: #e4796d;
+      --grass: #3f6b3a; --grass2: #3a6436; --outside: #2f4f2d; --stone: #8a9099;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121713; --bg2: #1a211b; --bg3: #222b24; --fg: #e4eadf; --muted: #98a69b; --line: #2f3a31;
+    --accent: #5fc291; --accent-ink: #0f1a13; --gold: #e0ad4a; --danger: #e4796d;
+    --grass: #3f6b3a; --grass2: #3a6436; --outside: #2f4f2d; --stone: #8a9099;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.45;
+    padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0 32px;
+  }
+  h1, h2, h3 { font-family: var(--font-display); letter-spacing: 0.01em; text-wrap: balance; margin: 0; }
+  h1 { font-size: 34px; font-weight: 700; line-height: 1; }
+  h2 { font-size: 20px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  h3 { font-size: 17px; font-weight: 600; }
+  .eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+  header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; padding-block: 22px 14px; border-bottom: 1px solid var(--line); }
+  header p { margin: 4px 0 0; color: var(--muted); max-width: 60ch; }
+  .th-badge { font-family: var(--font-display); font-size: 28px; font-weight: 700; color: var(--gold); line-height: 1; }
+  .app { display: grid; grid-template-columns: minmax(300px, 390px) minmax(0, 1fr); gap: 20px; padding-top: 18px; align-items: start; }
+  @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
+  .panel { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .stack { display: grid; gap: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+  label { font-size: 13px; color: var(--muted); font-weight: 600; }
+  select, input[type="number"], input[type="text"] {
+    font: inherit; font-size: 14px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; min-width: 0;
+  }
+  input[type="number"] { width: 64px; font-family: var(--font-mono); }
+  select:focus, input:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { font: inherit; font-weight: 600; border-radius: 7px; border: 1px solid var(--line); background: var(--bg3); color: var(--fg); padding: 7px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-family: var(--font-display); font-size: 18px; letter-spacing: 0.03em; padding: 8px 18px; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg label { padding: 5px 10px; cursor: pointer; font-weight: 600; color: var(--muted); font-size: 13px; }
+  .seg input { display: none; }
+  .seg input:checked + span { color: var(--accent-ink); }
+  .seg label:has(input:checked) { background: var(--accent); color: var(--accent-ink); }
+  .progress { height: 8px; background: var(--bg3); border-radius: 4px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width 0.2s linear; }
+  .status { font-size: 13px; color: var(--muted); min-height: 1.2em; font-family: var(--font-mono); }
+  table.inv { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.inv th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  table.inv td { padding: 4px 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.inv tr.group td { padding-top: 12px; font-family: var(--font-display); font-size: 16px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: none; }
+  table.inv input[type="text"] { width: 100%; min-width: 64px; font-family: var(--font-mono); font-size: 13px; }
+  table.inv input[type="number"] { width: 52px; padding-inline: 4px; }
+  table.inv select { font-size: 12px; padding: 4px 4px; }
+  table.inv .name { min-width: 0; line-height: 1.2; }
+  table.inv .name small { display: block; color: var(--muted); font-size: 11px; font-family: var(--font-mono); }
+  .inv-wrap { max-height: 70vh; overflow: auto; margin: 0 -6px; padding: 0 6px; }
+  .board { display: grid; gap: 16px; min-width: 0; }
+  .map-wrap { position: relative; width: 100%; max-width: 760px; margin: 0 auto; }
+  canvas#map { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--line); touch-action: none; cursor: crosshair; }
+  .tooltip { position: absolute; pointer-events: none; background: var(--bg2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,0.18); max-width: 240px; z-index: 3; }
+  .tooltip b { font-family: var(--font-display); font-size: 16px; }
+  .tooltip .mono { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); }
+  .legend span::before { content: ""; display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
+  .toggles { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; }
+  .toggles label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .score-big { font-family: var(--font-display); font-size: 56px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .score-big small { font-size: 18px; color: var(--muted); font-weight: 600; margin-left: 4px; }
+  .bars { display: grid; gap: 6px; margin-top: 10px; }
+  .bar { display: grid; grid-template-columns: 110px 1fr 48px; align-items: center; gap: 8px; font-size: 13px; }
+  .bar .track { height: 8px; background: var(--bg3); border-radius: 4px; overflow: hidden; }
+  .bar .track > div { height: 100%; background: var(--gold); }
+  .bar .val { font-family: var(--font-mono); font-size: 12px; color: var(--muted); text-align: right; }
+  ul.notes, ul.upg { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 5px; font-size: 14px; }
+  ul.upg li b { font-family: var(--font-mono); font-weight: 600; }
+  .muted { color: var(--muted); }
+  details summary { cursor: pointer; font-weight: 600; color: var(--muted); }
+  pre.textmap { font-family: var(--font-mono); font-size: 10.5px; line-height: 1.15; overflow-x: auto; background: var(--bg3); padding: 10px; border-radius: 8px; }
+  .toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 9px 16px; border-radius: 8px; font-size: 14px; z-index: 9; opacity: 0; transition: opacity 0.25s; max-width: calc(100vw - 32px); }
+  .toast.show { opacity: 1; }
+  .hint { font-size: 13px; color: var(--muted); margin: 0; }
+  @media (prefers-reduced-motion: reduce) { .progress > div, .toast { transition: none; } }
+</style>
+
+<header>
+  <div>
+    <div class="eyebrow">Home Village · 44 × 44 tiles</div>
+    <h1>Clash Base Optimizer</h1>
+    <p>Pick your Town Hall, enter what you own and at what level, and the optimizer lays out walls, buildings and traps for defense. Drag any building afterwards to tweak; the score updates.</p>
+  </div>
+  <div class="th-badge" id="th-badge">TH 12</div>
+</header>
+
+<main class="app">
+  <aside class="stack">
+    <section class="panel stack" aria-labelledby="setup-h">
+      <h2 id="setup-h">Setup</h2>
+      <div class="row">
+        <label for="th-select">Town Hall</label>
+        <select id="th-select"></select>
+        <label>Protect</label>
+        <div class="seg" role="radiogroup" aria-label="Base purpose">
+          <label><input type="radio" name="mode" value="war" checked><span>War / Trophy</span></label>
+          <label><input type="radio" name="mode" value="farm"><span>Farming</span></label>
+          <label><input type="radio" name="mode" value="hybrid"><span>Hybrid</span></label>
+        </div>
+      </div>
+      <div class="row">
+        <label for="effort">Effort</label>
+        <select id="effort">
+          <option value="120000">Quick</option>
+          <option value="400000" selected>Normal</option>
+          <option value="1500000">Thorough</option>
+        </select>
+        <label for="seed">Seed</label>
+        <input type="number" id="seed" value="7" min="1" max="999999" title="Change the seed to get a different layout with the same inputs">
+      </div>
+      <div class="row">
+        <button class="primary" id="btn-opt">Optimize base</button>
+        <button id="btn-stop" disabled>Stop</button>
+        <button id="btn-reset" title="Set counts and levels back to the maximum for this Town Hall">Reset to TH max</button>
+      </div>
+      <div class="progress" aria-hidden="true"><div id="progress"></div></div>
+      <div class="status" id="status">Ready.</div>
+    </section>
+
+    <section class="panel" aria-labelledby="inv-h">
+      <h2 id="inv-h">Your buildings</h2>
+      <p class="hint">Counts default to the maximum at this Town Hall (with merges done). Levels: leave blank for max, type one number for all, or a list like <code>14,14,13,12</code>. "Place" overrides where the optimizer puts a building.</p>
+      <div class="inv-wrap">
+        <table class="inv">
+          <thead><tr><th>Building</th><th>Have</th><th>Levels</th><th>Place</th></tr></thead>
+          <tbody id="inventory"></tbody>
+        </table>
+      </div>
+    </section>
+  </aside>
+
+  <section class="board">
+    <div class="map-wrap">
+      <canvas id="map" width="704" height="704" aria-label="Base layout map"></canvas>
+      <div class="tooltip" id="tooltip" hidden></div>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="show-traps" checked> Traps</label>
+      <label><input type="checkbox" id="show-heat"> Coverage heat (red = thin ground coverage)</label>
+      <label><input type="checkbox" id="show-ranges"> All defense ranges</label>
+      <label><input type="checkbox" id="show-labels" checked> Labels</label>
+    </div>
+    <div class="legend" id="legend"></div>
+
+    <div class="readouts">
+      <section class="panel" aria-labelledby="score-h">
+        <h2 id="score-h">Defense score</h2>
+        <div class="score-big" id="score-big">—<small>/ 100</small></div>
+        <p class="hint" id="score-hint">Higher is better. The score is built from eight checks; the bars show how much each one still costs you.</p>
+        <div class="bars" id="breakdown"></div>
+      </section>
+      <section class="panel" aria-labelledby="notes-h">
+        <h2 id="notes-h">What to fix</h2>
+        <ul class="notes" id="notes"><li class="muted">Run the optimizer to see notes on the layout.</li></ul>
+      </section>
+      <section class="panel" aria-labelledby="upg-h">
+        <h2 id="upg-h">Upgrade priorities</h2>
+        <p class="hint">Defenses below the max for your Town Hall, ranked by how much damage per second the remaining levels add.</p>
+        <ul class="upg" id="upgrades"></ul>
+      </section>
+      <section class="panel" aria-labelledby="export-h">
+        <h2 id="export-h">Save & export</h2>
+        <p class="hint">Your inventory and the last layout are kept in this browser. Export the layout to copy it into the game by hand.</p>
+        <div class="row" style="margin-top:10px">
+          <button id="btn-copy">Copy layout as JSON</button>
+          <button id="btn-png">Download map image</button>
+        </div>
+        <details style="margin-top:12px">
+          <summary>Text map</summary>
+          <pre class="textmap" id="textmap"></pre>
+        </details>
+      </section>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="data.js"></script>
+<script src="optimizer.js"></script>
+<script>
+(function () {
+  'use strict';
+  const D = window.COC_DATA;
+  const OPT = window.createOptimizer();
+  const G = 44;
+  const $ = (id) => document.getElementById(id);
+  const STORE_KEY = 'clash-base-optimizer:v1';
+
+  // ---------- colors ----------
+  const ROLE_COLORS = {
+    th: '#d9a21b', cc: '#7b5cc9', key: '#c84b3c', defense: '#4f6fa6', splash: '#e07a2f', air: '#3f9fd1',
+    sweeper: '#2bb3a3', support: '#9a5fc4', storage: '#b58a2a', hero: '#e05c8a', collector: '#6f9a4a', army: '#8a7a66', hut: '#8f8f8f',
+  };
+  const ID_COLORS = { 'gold-storage': '#d4a12a', 'elixir-storage': '#c04fc0', 'dark-elixir-storage': '#4a3b5c', 'gold-mine': '#c7a24b', 'elixir-collector': '#b07ab8', 'dark-elixir-drill': '#5e5068' };
+  const TRAP_COLORS = { ground: '#c0392b', air: '#2980b9', both: '#8e44ad' };
+  function colorOf(it) { return ID_COLORS[it.id] || ROLE_COLORS[it.role] || '#777'; }
+
+  // ---------- inventory state ----------
+  let result = null;      // last full result
+  let spec = null;        // spec that produced `result`
+  let worker = null;
+  let live = null;        // {positions, skel} during optimization
+  let inv = loadInv() || defaultInv(12);
+
+  function defaultInv(th) {
+    return { th, mode: 'war', effort: '400000', seed: 7, rows: {}, walls: {}, traps: {}, thWeaponLv: null, crafted: null };
+  }
+  function loadInv() {
+    try { const s = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); if (s && s.inv) { result = s.result || null; spec = s.spec || null; return s.inv; } } catch (e) {}
+    return null;
+  }
+  function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify({ inv, result, spec })); } catch (e) {} }
+
+  function maxLevelAt(b, th) { let m = 0; for (const l of b.levels) if (l.th <= th && l.lv > m) m = l.lv; return m; }
+  function levelData(b, lv) { return b.levels.find(l => l.lv === lv) || b.levels[b.levels.length - 1] || null; }
+  function maxCount(b, th) { const p = b.perTH[th]; return p ? Math.max(p[0], p[1]) : 0; }
+  function defaultCount(b, th) { const p = b.perTH[th]; return p ? p[1] : 0; }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function parseLevels(str, count, maxLv, hardMax) {
+    const s = (str || '').trim().toLowerCase();
+    const out = [];
+    if (!s || s === 'max') { for (let i = 0; i < count; i++) out.push(maxLv); return out; }
+    const parts = s.split(/[,\s]+/).filter(Boolean).map(p => parseInt(p, 10)).filter(n => !isNaN(n));
+    if (!parts.length) { for (let i = 0; i < count; i++) out.push(maxLv); return out; }
+    for (let i = 0; i < count; i++) out.push(clamp(parts[Math.min(i, parts.length - 1)], 1, hardMax));
+    return out;
+  }
+
+  // ---------- inventory UI ----------
+  const GROUPS = [
+    { title: 'Defenses', filter: b => b.cat === 'defense' },
+    { title: 'Clan Castle, storages & heroes', filter: b => b.cat === 'resource' && b.role !== 'collector' || b.role === 'hero' },
+    { title: 'Collectors, army & other', filter: b => b.role === 'collector' || (b.cat === 'army' && b.role !== 'hero') },
+  ];
+  function buildTHSelect() {
+    const sel = $('th-select');
+    sel.innerHTML = '';
+    for (let t = 3; t <= D.maxTH; t++) { const o = document.createElement('option'); o.value = t; o.textContent = 'Town Hall ' + t; sel.appendChild(o); }
+    sel.value = inv.th;
+  }
+  function buildInventory() {
+    const th = inv.th, tb = $('inventory');
+    tb.innerHTML = '';
+    for (const g of GROUPS) {
+      const rows = D.buildings.filter(b => g.filter(b) && maxCount(b, th) > 0);
+      if (!rows.length) continue;
+      const tr = document.createElement('tr'); tr.className = 'group';
+      tr.innerHTML = `<td colspan="4">${g.title}</td>`; tb.appendChild(tr);
+      for (const b of rows) tb.appendChild(invRow(b, th));
+    }
+    // Town Hall weapon
+    const thl = D.townHall.levels[th];
+    if (thl && thl.weapon) {
+      const w = thl.weapon, tr = document.createElement('tr');
+      const opts = w.levels.map(l => `<option value="${l.lv}">${l.lv}</option>`).join('');
+      tr.innerHTML = `<td class="name">${w.name}<small>Town Hall weapon · range ${w.range}</small></td><td>1</td><td><select id="th-weapon-lv" aria-label="${w.name} level">${opts}</select></td><td class="muted">core</td>`;
+      tb.appendChild(tr);
+      const sel = tr.querySelector('select');
+      sel.value = inv.thWeaponLv || w.levels[w.levels.length - 1].lv;
+      sel.addEventListener('change', () => { inv.thWeaponLv = +sel.value; save(); });
+    }
+    // Walls
+    const wtr = document.createElement('tr'); wtr.className = 'group'; wtr.innerHTML = '<td colspan="4">Walls & traps</td>'; tb.appendChild(wtr);
+    const wmax = D.wall.perTH[th] || 0, wlvMax = maxLevelAt(D.wall, th);
+    const wrow = document.createElement('tr');
+    wrow.innerHTML = `<td class="name">Walls<small>1x1 · max ${wmax}</small></td><td><input type="number" id="walls-count" min="0" max="${wmax}" aria-label="Wall pieces"></td><td><input type="text" id="walls-lv" placeholder="max (${wlvMax})" aria-label="Wall level"></td><td class="muted">—</td>`;
+    tb.appendChild(wrow);
+    const wc = wrow.querySelector('#walls-count'), wl = wrow.querySelector('#walls-lv');
+    wc.value = inv.walls.count ?? wmax; wl.value = inv.walls.lv || '';
+    wc.addEventListener('change', () => { inv.walls.count = clamp(parseInt(wc.value, 10) || 0, 0, 2000); wc.value = inv.walls.count; save(); });
+    wl.addEventListener('change', () => { inv.walls.lv = wl.value; save(); });
+    for (const t of D.traps) {
+      const max = t.perTH[th] || 0; if (!max) continue;
+      const lvMax = maxLevelAt(t, th), row = inv.traps[t.id] || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="name">${t.name}<small>${t.size[0]}x${t.size[1]} · ${t.target}</small></td><td><input type="number" min="0" max="${max}" aria-label="${t.name} count"></td><td><input type="text" placeholder="max (${lvMax})" aria-label="${t.name} level"></td><td class="muted">auto</td>`;
+      tb.appendChild(tr);
+      const c = tr.querySelector('input[type=number]'), l = tr.querySelector('input[type=text]');
+      c.value = row.count ?? max; l.value = row.levels || '';
+      c.addEventListener('change', () => { inv.traps[t.id] = inv.traps[t.id] || {}; inv.traps[t.id].count = clamp(parseInt(c.value, 10) || 0, 0, max); c.value = inv.traps[t.id].count; save(); });
+      l.addEventListener('change', () => { inv.traps[t.id] = inv.traps[t.id] || {}; inv.traps[t.id].levels = l.value; save(); });
+    }
+    // Crafting station payload (TH18)
+    const cs = D.buildings.find(b => b.id === 'crafting-station');
+    if (cs && maxCount(cs, th) > 0) {
+      const tr = document.createElement('tr');
+      const opts = D.crafted.map(c => `<option value="${c.id}">${c.name}${c.current ? '' : ' (past season)'}</option>`).join('');
+      tr.innerHTML = `<td class="name">Crafted defense<small>what sits on the Crafting Station</small></td><td colspan="3"><select id="crafted-sel" aria-label="Crafted defense">${opts}</select></td>`;
+      tb.appendChild(tr);
+      const sel = tr.querySelector('select');
+      sel.value = inv.crafted || (D.crafted.find(c => c.current) || D.crafted[0]).id;
+      sel.addEventListener('change', () => { inv.crafted = sel.value; save(); });
+    }
+  }
+  function invRow(b, th) {
+    const row = inv.rows[b.id] || {};
+    const max = maxCount(b, th), lvMax = maxLevelAt(b, th);
+    const tr = document.createElement('tr');
+    const meta = `${b.size[0]}x${b.size[1]}` + (b.range ? ` · range ${b.range}${b.minRange ? ' (min ' + b.minRange + ')' : ''}` : '') + (b.target ? ` · ${b.target}` : '');
+    const lvCell = b.levels.length ? `<input type="text" placeholder="max (${lvMax})" aria-label="${b.name} levels">` : '<span class="muted">—</span>';
+    tr.innerHTML = `<td class="name">${b.name}<small>${meta}</small></td><td><input type="number" min="0" max="${max}" aria-label="${b.name} count"></td><td>${lvCell}</td><td><select aria-label="${b.name} placement"><option value="auto">auto</option><option value="in">inside</option><option value="out">outside</option></select></td>`;
+    const c = tr.querySelector('input[type=number]'), l = tr.querySelector('input[type=text]'), p = tr.querySelector('select');
+    c.value = row.count ?? defaultCount(b, th);
+    if (l) l.value = row.levels || '';
+    p.value = row.place || 'auto';
+    const upd = () => {
+      inv.rows[b.id] = { count: clamp(parseInt(c.value, 10) || 0, 0, Math.max(max, 12)), levels: l ? l.value : '', place: p.value };
+      c.value = inv.rows[b.id].count; save();
+    };
+    c.addEventListener('change', upd); if (l) l.addEventListener('change', upd); p.addEventListener('change', upd);
+    return tr;
+  }
+
+  // ---------- spec ----------
+  function buildSpec() {
+    const th = inv.th, items = [];
+    const thl = D.townHall.levels[th], weapon = thl ? thl.weapon : null;
+    let wdps = 0;
+    if (weapon) { const lv = clamp(inv.thWeaponLv || weapon.levels[weapon.levels.length - 1].lv, 1, weapon.levels.length); wdps = (weapon.levels[lv - 1].dps || 0) * (weapon.targets || 1); }
+    items.push({ id: 'town-hall', name: 'Town Hall', short: 'TH', idx: 0, w: 4, h: 4, role: 'th', place: 'in', cat: 'townhall', target: weapon ? 'both' : null, range: weapon ? weapon.range : 0, minRange: 0, splash: false, dps: wdps, hp: thl ? thl.hp : 0, lv: th, isDef: !!weapon, maxLv: th });
+    const crafted = D.crafted.find(c => c.id === inv.crafted) || D.crafted.find(c => c.current) || D.crafted[0];
+    for (const b of D.buildings) {
+      const row = inv.rows[b.id] || {};
+      const count = row.count ?? defaultCount(b, th);
+      if (!count) continue;
+      const lvMax = maxLevelAt(b, th) || 1, hardMax = b.levels.length ? b.levels[b.levels.length - 1].lv : 1;
+      const lvs = parseLevels(row.levels, count, lvMax, hardMax);
+      for (let k = 0; k < count; k++) {
+        const lv = lvs[k], ld = b.levels.length ? levelData(b, lv) : null;
+        let place = row.place && row.place !== 'auto' ? row.place : b.place;
+        let isDef = b.cat === 'defense' && b.range > 0, role = b.role;
+        let range = b.range, minRange = b.minRange, target = b.target, w = b.size[0], h = b.size[1], name = b.name, short = b.short;
+        if (b.id === 'builders-hut') {
+          if (lv >= 2) { isDef = true; role = 'defense'; if (!(row.place && row.place !== 'auto')) place = 'in'; }
+          else { isDef = false; role = 'hut'; }
+        }
+        if (b.id === 'crafting-station' && crafted) { range = crafted.range; minRange = crafted.minRange; target = crafted.target; w = crafted.size[0]; h = crafted.size[1]; name = crafted.name; isDef = true; }
+        items.push({ id: b.id, name, short, idx: k + 1, w, h, role, place, cat: b.cat, target, range, minRange, splash: b.splash, dps: ld ? ld.dps : (b.id === 'crafting-station' ? 300 : 0), hp: ld ? ld.hp : 0, lv, isDef, maxLv: lvMax });
+      }
+    }
+    const traps = [];
+    for (const t of D.traps) {
+      const max = t.perTH[th] || 0; if (!max) continue;
+      const row = inv.traps[t.id] || {};
+      const count = row.count ?? max; if (!count) continue;
+      const lvMax = maxLevelAt(t, th) || 1;
+      traps.push({ id: t.id, name: t.name, short: t.short, w: t.size[0], h: t.size[1], target: t.target, trigger: t.trigger, count, lv: parseLevels(row.levels, 1, lvMax, t.levels[t.levels.length - 1].lv)[0] });
+    }
+    const wmax = D.wall.perTH[th] || 0;
+    return { th, mode: inv.mode, grid: G, items, walls: inv.walls.count ?? wmax, traps, iterations: parseInt(inv.effort, 10) || 400000, seed: parseInt(inv.seed, 10) || 7 };
+  }
+
+  // ---------- optimizer worker ----------
+  function workerSource() {
+    return 'const OptimizerAPI = (' + window.createOptimizer.toString() + ')();\n' +
+      'self.onmessage = function (e) { try { const res = OptimizerAPI.optimize(e.data.spec, function (p) { self.postMessage({ type: "progress", phase: p.phase, it: p.it, iters: p.iters, cost: p.cost, best: p.best, positions: p.positions, skel: p.skel }); }); self.postMessage({ type: "done", result: res }); } catch (err) { self.postMessage({ type: "error", message: String(err && err.stack || err) }); } };';
+  }
+  function startOptimize() {
+    stopOptimize(false);
+    spec = buildSpec();
+    if (spec.items.length > 130) { toast('That is more buildings than fit on the map. Check the counts.'); return; }
+    const url = URL.createObjectURL(new Blob([workerSource()], { type: 'text/javascript' }));
+    try { worker = new Worker(url); } catch (e) { toast('Could not start the background worker: ' + e.message); return; }
+    finally { setTimeout(() => URL.revokeObjectURL(url), 5000); }
+    $('btn-opt').disabled = true; $('btn-stop').disabled = false;
+    setStatus('Choosing a wall layout…'); setProgress(0);
+    live = null;
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'progress') {
+        const pct = m.phase.startsWith('Trying') ? 15 * (m.it / m.iters) : 15 + 85 * (m.it / m.iters);
+        setProgress(pct);
+        setStatus(`${m.phase} · cost ${m.best.toFixed(1)}`);
+        live = { positions: m.positions, skel: m.skel };
+        render();
+      } else if (m.type === 'done') {
+        result = m.result; live = null;
+        setProgress(100); setStatus(`Done. ${result.wallsUsed} of ${spec.walls} wall pieces used, ${result.traps.length} traps placed.`);
+        finish(); save(); renderAll();
+      } else if (m.type === 'error') {
+        setStatus('The optimizer hit an error.'); toast(m.message.split('\n')[0]); finish();
+      }
+    };
+    worker.postMessage({ spec });
+  }
+  function finish() { if (worker) { worker.terminate(); worker = null; } $('btn-opt').disabled = false; $('btn-stop').disabled = true; }
+  function stopOptimize(keep) {
+    if (!worker) return;
+    finish();
+    if (keep && live && spec) {
+      // Score the best layout seen so far on the main thread.
+      const layout = { skel: live.skel, items: live.positions.map((p, k) => ({ x: p[0], y: p[1], place: spec.items[k].place })) };
+      const r = OPT.evaluate(spec, layout, -1, 0, 0);
+      if (!r.error) { result = r; save(); renderAll(); setStatus('Stopped early. Showing the best layout found so far.'); }
+    }
+  }
+  function setStatus(t) { $('status').textContent = t; }
+  function setProgress(p) { $('progress').style.width = clamp(p, 0, 100) + '%'; }
+
+  // ---------- rendering ----------
+  const canvas = $('map'), ctx = canvas.getContext('2d');
+  const PAD = 8, T = 16; // tile px at base resolution
+  const BASE = G * T + PAD * 2;
+  let hover = -1, drag = null;
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function currentItems() {
+    if (live && spec) return spec.items.map((it, k) => ({ ...it, x: live.positions[k][0], y: live.positions[k][1] }));
+    return result ? result.items : [];
+  }
+  function currentWalls() {
+    if (live) return live.skel ? OPT.wallsFromSkel(live.skel) : [];
+    return result ? result.walls : [];
+  }
+  function render() {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    if (canvas.width !== BASE * dpr) { canvas.width = BASE * dpr; canvas.height = BASE * dpr; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, BASE, BASE);
+    const grass = cssVar('--grass') || '#8fb86a', grass2 = cssVar('--grass2') || '#86ad60', outside = cssVar('--outside') || '#a3c182', stone = cssVar('--stone') || '#5b5f66', fg = cssVar('--fg') || '#222';
+    ctx.fillStyle = outside; ctx.fillRect(0, 0, BASE, BASE);
+    // tiles
+    for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+      ctx.fillStyle = (x + y) % 2 ? grass : grass2;
+      ctx.fillRect(PAD + x * T, PAD + y * T, T, T);
+    }
+    const items = currentItems(), walls = currentWalls();
+    const cells = result && !live ? result.cells : (live && live.skel ? cellsFromSkel(live.skel) : []);
+    // compartment interiors
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    for (const c of cells) ctx.fillRect(PAD + c.x0 * T, PAD + c.y0 * T, c.w * T, c.h * T);
+    // heat
+    if ($('show-heat').checked && result && !live) {
+      const Tg = result.thresholds.ground || 1;
+      for (let t = 0; t < G * G; t++) {
+        const v = result.covG[t] / Tg;
+        if (v < 1) { ctx.fillStyle = `rgba(200,40,30,${(1 - v) * 0.45})`; ctx.fillRect(PAD + (t % G) * T, PAD + Math.floor(t / G) * T, T, T); }
+      }
+    }
+    // walls
+    ctx.fillStyle = stone;
+    for (const [x, y] of walls) ctx.fillRect(PAD + x * T + 1, PAD + y * T + 1, T - 2, T - 2);
+    // ranges
+    const showRanges = $('show-ranges').checked;
+    ctx.lineWidth = 1;
+    if (showRanges) for (const it of items) if (it.isDef && it.range && it.range < 40) drawRange(it, 'rgba(255,255,255,0.35)');
+    // buildings
+    const showLabels = $('show-labels').checked;
+    items.forEach((it, k) => {
+      if (drag && drag.idx === k) return;
+      drawItem(it, k === hover, showLabels, fg);
+    });
+    // traps
+    if ($('show-traps').checked && result && !live) {
+      for (const tr of result.traps) {
+        const cx = PAD + (tr.x + tr.w / 2) * T, cy = PAD + (tr.y + tr.h / 2) * T, r = tr.w === 2 ? T * 0.75 : T * 0.36;
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fillStyle = TRAP_COLORS[tr.target] || '#555'; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.stroke();
+        if (showLabels) { ctx.fillStyle = '#fff'; ctx.font = `600 ${tr.w === 2 ? 11 : 8}px ${cssVar('--font-mono')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(tr.short, cx, cy + 0.5); }
+      }
+    }
+    // hover range
+    if (hover >= 0 && items[hover] && items[hover].isDef && items[hover].range) drawRange(items[hover], 'rgba(255,255,255,0.9)', true);
+    // drag ghost
+    if (drag) {
+      const it = items[drag.idx];
+      ctx.globalAlpha = 0.65;
+      drawItem({ ...it, x: drag.gx, y: drag.gy }, true, showLabels, fg);
+      ctx.globalAlpha = 1;
+    }
+  }
+  function cellsFromSkel(skel) {
+    const cells = []; let cy = skel.y0 + 1;
+    for (const h of skel.H) { let cx = skel.x0 + 1; for (const w of skel.W) { cells.push({ x0: cx, y0: cy, w, h }); cx += w + 1; } cy += h + 1; }
+    return cells;
+  }
+  function drawRange(it, color, strong) {
+    const cx = PAD + (it.x + it.w / 2) * T, cy = PAD + (it.y + it.h / 2) * T;
+    ctx.strokeStyle = color; ctx.lineWidth = strong ? 2 : 1;
+    ctx.setLineDash(strong ? [] : [3, 4]);
+    ctx.beginPath(); ctx.arc(cx, cy, Math.min(it.range, 40) * T, 0, Math.PI * 2); ctx.stroke();
+    if (it.minRange) { ctx.beginPath(); ctx.arc(cx, cy, it.minRange * T, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.lineWidth = 1;
+    if (strong) { ctx.fillStyle = color.replace('0.9', '0.08'); ctx.beginPath(); ctx.arc(cx, cy, Math.min(it.range, 40) * T, 0, Math.PI * 2); ctx.fill(); }
+  }
+  function drawItem(it, hl, showLabels, fg) {
+    const x = PAD + it.x * T, y = PAD + it.y * T, w = it.w * T, h = it.h * T;
+    ctx.fillStyle = colorOf(it);
+    roundRect(x + 1.5, y + 1.5, w - 3, h - 3, 4); ctx.fill();
+    ctx.strokeStyle = hl ? '#fff' : 'rgba(0,0,0,0.35)'; ctx.lineWidth = hl ? 2.5 : 1; roundRect(x + 1.5, y + 1.5, w - 3, h - 3, 4); ctx.stroke(); ctx.lineWidth = 1;
+    if (it.id === 'air-sweeper' && typeof it.dir === 'number') {
+      const cx = x + w / 2, cy = y + h / 2;
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(it.dir) * T * 1.4, cy + Math.sin(it.dir) * T * 1.4); ctx.stroke(); ctx.lineWidth = 1;
+    }
+    if (!showLabels) return;
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const big = it.w >= 3;
+    ctx.font = `700 ${big ? 12 : 10}px ${cssVar('--font-display')}`;
+    ctx.fillText(it.short, x + w / 2, y + h / 2 - (big ? 5 : 3));
+    if (it.lv && it.id !== 'hero-banner') { ctx.font = `600 ${big ? 10 : 8}px ${cssVar('--font-mono')}`; ctx.fillText(String(it.lv), x + w / 2, y + h / 2 + (big ? 7 : 5)); }
+  }
+  function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+
+  // ---------- pointer: hover + drag ----------
+  function tileAt(ev) {
+    const r = canvas.getBoundingClientRect(), sx = BASE / r.width;
+    const px = (ev.clientX - r.left) * sx - PAD, py = (ev.clientY - r.top) * sx - PAD;
+    return [Math.floor(px / T), Math.floor(py / T)];
+  }
+  function itemAt(tx, ty) {
+    const items = currentItems();
+    for (let k = items.length - 1; k >= 0; k--) { const it = items[k]; if (tx >= it.x && tx < it.x + it.w && ty >= it.y && ty < it.y + it.h) return k; }
+    return -1;
+  }
+  canvas.addEventListener('pointermove', (ev) => {
+    const [tx, ty] = tileAt(ev);
+    if (drag) { drag.gx = clamp(tx - drag.dx, 0, G - drag.w); drag.gy = clamp(ty - drag.dy, 0, G - drag.h); render(); return; }
+    const k = itemAt(tx, ty);
+    if (k !== hover) { hover = k; render(); }
+    const tip = $('tooltip');
+    if (k >= 0) {
+      const it = currentItems()[k];
+      const stat = it.isDef ? `<div class="mono">range ${it.range}${it.minRange ? ' (min ' + it.minRange + ')' : ''} · ${it.target} · ${Math.round(it.dps)} dps · ${it.hp} hp</div>` : (it.hp ? `<div class="mono">${it.hp} hp</div>` : '');
+      tip.innerHTML = `<b>${it.name}${it.idx ? ' #' + it.idx : ''}</b>${it.lv && it.id !== 'hero-banner' ? ' <span class="mono">lv ' + it.lv + '</span>' : ''}${stat}<div class="mono">tile ${it.x},${it.y} · ${it.place === 'in' ? 'inside walls' : 'outside'}</div>`;
+      tip.hidden = false;
+      const r = canvas.getBoundingClientRect();
+      let lx = ev.clientX - r.left + 14, ly = ev.clientY - r.top + 14;
+      if (lx + 240 > r.width) lx = ev.clientX - r.left - 250;
+      tip.style.left = lx + 'px'; tip.style.top = ly + 'px';
+    } else tip.hidden = true;
+  });
+  canvas.addEventListener('pointerleave', () => { hover = -1; $('tooltip').hidden = true; render(); });
+  canvas.addEventListener('pointerdown', (ev) => {
+    if (!result || live || worker) return;
+    const [tx, ty] = tileAt(ev), k = itemAt(tx, ty);
+    if (k < 0) return;
+    const it = result.items[k];
+    drag = { idx: k, dx: tx - it.x, dy: ty - it.y, w: it.w, h: it.h, gx: it.x, gy: it.y };
+    canvas.setPointerCapture(ev.pointerId);
+    $('tooltip').hidden = true;
+  });
+  canvas.addEventListener('pointerup', (ev) => {
+    if (!drag) return;
+    const d = drag; drag = null;
+    const it = result.items[d.idx];
+    if (d.gx === it.x && d.gy === it.y) { render(); return; }
+    const r = OPT.evaluate(spec, result, d.idx, d.gx, d.gy);
+    if (r.error) { toast(r.error); render(); return; }
+    result = r; save(); renderAll();
+    setStatus(`Moved ${it.name}. Score re-computed.`);
+  });
+  canvas.addEventListener('pointercancel', () => { drag = null; render(); });
+
+  // ---------- readouts ----------
+  const PART_LABELS = { coverage: 'Fire coverage', centrality: 'Core protection', depth: 'Wall layers', spacing: 'Defense spread', compartments: 'Compartments', splash: 'Splash support', outside: 'Outer ring', sweeper: 'Sweepers' };
+  const PART_HELP = {
+    coverage: 'Every tile of your base should be inside the range of several ground- and air-hitting defenses.',
+    centrality: 'Town Hall, Clan Castle, storages (farming) and key defenses close to the middle.',
+    depth: 'How many wall layers protect the Clan Castle, Town Hall, Air Defenses and key defenses.',
+    spacing: 'Same-type defenses spread out so one spell cannot hit two, with Air Defenses centered as a group.',
+    compartments: 'No empty or overcrowded compartments; storages and Air Defenses in separate ones.',
+    splash: 'Wizard Towers and other splash near Air Defenses, storages and point defenses.',
+    outside: 'Collectors and army buildings hugging the walls with gaps between them.',
+    sweeper: 'Air Sweepers a few tiles from the Town Hall, on different sides.',
+  };
+  function renderScore() {
+    const bd = result.score;
+    const rating = Math.max(0, Math.round(100 - bd.total));
+    $('score-big').innerHTML = `${rating}<small>/ 100</small>`;
+    const parts = Object.entries(bd.parts).sort((a, b) => b[1].weighted - a[1].weighted);
+    const max = Math.max(1, ...parts.map(p => p[1].weighted));
+    $('breakdown').innerHTML = parts.map(([k, v]) => `<div class="bar" title="${PART_HELP[k] || ''}"><span>${PART_LABELS[k] || k}</span><div class="track"><div style="width:${(100 * v.weighted / max).toFixed(1)}%"></div></div><span class="val">−${v.weighted.toFixed(1)}</span></div>`).join('');
+  }
+  function renderNotes() {
+    const ul = $('notes');
+    if (!result.notes.length) { ul.innerHTML = '<li>No major issues found. Try another seed or Thorough effort to compare layouts.</li>'; return; }
+    ul.innerHTML = result.notes.map(n => `<li>${escapeHtml(n.text)}</li>`).join('');
+  }
+  function renderUpgrades() {
+    const ul = $('upgrades');
+    if (!spec) { ul.innerHTML = ''; return; }
+    const rows = [];
+    for (const it of spec.items) {
+      if (!it.isDef || it.id === 'town-hall' || it.id === 'crafting-station') continue;
+      const b = D.buildings.find(x => x.id === it.id); if (!b) continue;
+      if (it.lv >= it.maxLv) continue;
+      const cur = levelData(b, it.lv), top = levelData(b, it.maxLv);
+      if (!cur || !top) continue;
+      const gain = (top.dps || 0) - (cur.dps || 0), hpGain = (top.hp || 0) - (cur.hp || 0);
+      const weight = it.role === 'key' ? 1.5 : it.role === 'air' ? 1.3 : it.role === 'splash' ? 1.2 : 1;
+      rows.push({ text: `${it.name} #${it.idx}: lv ${it.lv} → ${it.maxLv}`, gain, hpGain, pct: cur.dps ? Math.round(100 * gain / cur.dps) : 0, w: gain * weight + hpGain * 0.02 });
+    }
+    rows.sort((a, b) => b.w - a.w);
+    ul.innerHTML = rows.length ? rows.slice(0, 10).map(r => `<li><b>${escapeHtml(r.text)}</b> <span class="muted">+${Math.round(r.gain)} dps${r.pct ? ' (+' + r.pct + '%)' : ''}, +${r.hpGain} hp</span></li>`).join('') : '<li class="muted">Every defense is at the max for this Town Hall.</li>';
+  }
+  function renderTextMap() {
+    if (!result) { $('textmap').textContent = ''; return; }
+    const grid = Array.from({ length: G }, () => Array(G).fill('. '));
+    for (const [x, y] of result.walls) grid[y][x] = '##';
+    for (const it of result.items) for (let j = it.y; j < it.y + it.h; j++) for (let i = it.x; i < it.x + it.w; i++) grid[j][i] = it.short.padEnd(2).slice(0, 2);
+    for (const t of result.traps) for (let j = t.y; j < t.y + t.h; j++) for (let i = t.x; i < t.x + t.w; i++) grid[j][i] = t.short.toLowerCase().padEnd(2).slice(0, 2);
+    $('textmap').textContent = grid.map(r => r.join('')).join('\n');
+  }
+  function renderLegend() {
+    const entries = [['th', 'Town Hall'], ['cc', 'Clan Castle'], ['key', 'Key defenses'], ['defense', 'Point defenses'], ['splash', 'Splash'], ['air', 'Air Defense'], ['sweeper', 'Air Sweeper'], ['support', 'Spell Tower'], ['storage', 'Storages'], ['hero', 'Hero Banner'], ['collector', 'Collectors'], ['army', 'Army & other']];
+    $('legend').innerHTML = entries.map(([k, n]) => `<span style="--c:${ROLE_COLORS[k]}">${n}</span>`).join('') + `<span style="--c:${TRAP_COLORS.ground}">Ground trap</span><span style="--c:${TRAP_COLORS.air}">Air trap</span><span style="--c:${TRAP_COLORS.both}">Any trap</span>`;
+  }
+  function renderAll() {
+    render();
+    if (result) { renderScore(); renderNotes(); renderTextMap(); }
+    renderUpgrades();
+  }
+  function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+  // ---------- export ----------
+  $('btn-copy').addEventListener('click', async () => {
+    if (!result) { toast('Run the optimizer first.'); return; }
+    const out = { townHall: spec.th, mode: spec.mode, grid: G, skeleton: result.skel, buildings: result.items.map(i => ({ id: i.id, n: i.idx, lv: i.lv, x: i.x, y: i.y, w: i.w, h: i.h })), traps: result.traps.map(t => ({ id: t.id, x: t.x, y: t.y })), walls: result.walls, score: Math.round(100 - result.score.total) };
+    const text = JSON.stringify(out);
+    try { await navigator.clipboard.writeText(text); toast('Layout copied as JSON.'); }
+    catch (e) { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); toast('Press Ctrl+C to copy the selected layout.'); setTimeout(() => ta.remove(), 15000); }
+  });
+  $('btn-png').addEventListener('click', async () => {
+    if (!result) { toast('Run the optimizer first.'); return; }
+    const filename = `clash-base-th${spec.th}-${spec.mode}.png`;
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+    if (!blob) { toast('Could not render the map image.'); return; }
+    // Inside the claude.ai viewer, saves go through the downloads capability; elsewhere a plain download link works.
+    const dl = window.claude && typeof window.claude.use === 'function' ? await window.claude.use('downloads') : null;
+    if (dl) {
+      try { await dl.save({ filename, data: blob }); toast('Map image saved.'); }
+      catch (e) { if (!(e && e.code === 'declined')) toast('Could not save the image here. Right-click the map and choose "Save image as".'); }
+      return;
+    }
+    try {
+      const url = URL.createObjectURL(blob), a = document.createElement('a');
+      a.download = filename; a.href = url; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (e) { toast('Right-click the map and choose "Save image as".'); }
+  });
+
+  // ---------- toast ----------
+  let toastTimer = 0;
+  function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3500); }
+
+  // ---------- wiring ----------
+  $('th-select').addEventListener('change', () => { inv.th = +$('th-select').value; inv.rows = {}; inv.traps = {}; inv.walls = {}; inv.thWeaponLv = null; result = null; $('th-badge').textContent = 'TH ' + inv.th; buildInventory(); save(); renderAll(); setStatus('Town Hall changed. Counts reset to the maximum for TH ' + inv.th + '.'); });
+  document.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener('change', () => { inv.mode = r.value; save(); }));
+  $('effort').addEventListener('change', () => { inv.effort = $('effort').value; save(); });
+  $('seed').addEventListener('change', () => { inv.seed = parseInt($('seed').value, 10) || 7; save(); });
+  $('btn-opt').addEventListener('click', startOptimize);
+  $('btn-stop').addEventListener('click', () => stopOptimize(true));
+  $('btn-reset').addEventListener('click', () => { inv.rows = {}; inv.traps = {}; inv.walls = {}; inv.thWeaponLv = null; buildInventory(); save(); toast('Counts and levels reset to the Town Hall maximum.'); });
+  ['show-traps', 'show-heat', 'show-ranges', 'show-labels'].forEach(id => $(id).addEventListener('change', render));
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+  new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+  buildTHSelect();
+  document.querySelector(`input[name=mode][value=${inv.mode}]`).checked = true;
+  $('effort').value = inv.effort || '400000';
+  $('seed').value = inv.seed || 7;
+  $('th-badge').textContent = 'TH ' + inv.th;
+  buildInventory();
+  renderLegend();
+  if (result && spec && result.items.length !== spec.items.length) { result = null; }
+  renderAll();
+  if (!result) setStatus('Ready. Check your buildings, then press Optimize base.');
+})();
+</script>
