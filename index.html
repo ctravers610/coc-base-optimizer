@@ -117,6 +117,11 @@
   .toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 9px 16px; border-radius: 8px; font-size: 14px; z-index: 9; opacity: 0; transition: opacity 0.25s; max-width: calc(100vw - 32px); }
   .toast.show { opacity: 1; }
   .hint { font-size: 13px; color: var(--muted); margin: 0; }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .thumbs:empty { display: none; }
+  .thumbs img { height: 64px; width: auto; max-width: 120px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+  input[type="file"] { font-size: 13px; max-width: 100%; }
+  input[type="password"] { font: inherit; font-size: 14px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-family: var(--font-mono); }
   @media (prefers-reduced-motion: reduce) { .progress > div, .toast { transition: none; } }
 </style>
 
@@ -160,6 +165,26 @@
       </div>
       <div class="progress" aria-hidden="true"><div id="progress"></div></div>
       <div class="status" id="status">Ready.</div>
+    </section>
+
+    <section class="panel stack" aria-labelledby="import-h">
+      <h2 id="import-h">Import from a screenshot</h2>
+      <p class="hint">Upload up to four screenshots of your village (zoomed-in shots work best). Claude counts the buildings and estimates levels from how they look, then fills in the table below for you to check.</p>
+      <div class="row">
+        <input type="file" id="shot-files" accept="image/png,image/jpeg,image/webp" multiple aria-label="Screenshots of your base">
+      </div>
+      <div class="thumbs" id="shot-thumbs"></div>
+      <div id="key-block" hidden>
+        <p class="hint">This copy runs outside claude.ai, so it needs your own Anthropic API key. The key stays in this browser and is sent only to api.anthropic.com. Get one at console.anthropic.com.</p>
+        <div class="row">
+          <input type="password" id="api-key" placeholder="sk-ant-…" autocomplete="off" aria-label="Anthropic API key" style="flex:1; min-width: 180px">
+          <label class="toggles"><input type="checkbox" id="remember-key"> Remember key</label>
+        </div>
+      </div>
+      <div class="row">
+        <button class="primary" id="btn-read" disabled>Read screenshots</button>
+        <span class="status" id="shot-status"></span>
+      </div>
     </section>
 
     <section class="panel" aria-labelledby="inv-h">
@@ -684,6 +709,173 @@
       setTimeout(() => URL.revokeObjectURL(url), 2000);
     } catch (e) { toast('Right-click the map and choose "Save image as".'); }
   });
+
+  // ---------- screenshot import ----------
+  const KEY_STORE = 'clash-base-optimizer:api-key';
+  let shotFiles = [];
+  let sampleFn = null;          // claude.use('sample') inside the claude.ai viewer
+  let sampleImagesOk = false;
+  function readableIds() {
+    // Buildings Claude is asked to count; Town Hall is reported separately.
+    return D.buildings.filter(b => b.id !== 'crafting-station').map(b => ({ id: b.id, name: b.name, size: b.size.join('x'), maxLv: b.levels.length ? b.levels[b.levels.length - 1].lv : 0 }));
+  }
+  function importPrompt() {
+    const list = readableIds().map(b => `${b.id} (${b.name}, ${b.size}${b.maxLv ? ', levels 1-' + b.maxLv : ''})`).join('; ');
+    return `These are screenshots of one player's Clash of Clans Home Village (the same village, possibly in overlapping parts; do not double count buildings that appear in more than one image).
+
+Task: produce an inventory of the village as JSON for a base-layout tool.
+
+Rules:
+- townHall: the Town Hall level (3-18) judged from the Town Hall's appearance, or 0 if it is not visible.
+- buildings: one entry per building type you can see, using exactly these ids: ${list}.
+- count: how many of that type exist in the village (across all images, deduplicated).
+- levels: one estimated level per building of that type, judged from its appearance (color, materials, decorations). Use your best estimate; the in-game level numbers are not shown in a base screenshot. If you cannot estimate, use an empty array.
+- Do not include walls, traps, decorations, obstacles, the Crafting Station, or heroes.
+- notes: one short sentence on anything uncertain (for example buildings hidden under the edge of a screenshot).
+
+Reply with only a JSON object of this exact shape and nothing else:
+{"townHall": 12, "buildings": [{"id": "cannon", "count": 7, "levels": [14, 14, 13, 13, 12, 12, 12]}], "notes": "..."}`;
+  }
+  const IMPORT_SCHEMA = {
+    type: 'object',
+    properties: {
+      townHall: { type: 'integer' },
+      buildings: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', enum: D.buildings.filter(b => b.id !== 'crafting-station').map(b => b.id) },
+            count: { type: 'integer' },
+            levels: { type: 'array', items: { type: 'integer' } },
+          },
+          required: ['id', 'count', 'levels'],
+          additionalProperties: false,
+        },
+      },
+      notes: { type: 'string' },
+    },
+    required: ['townHall', 'buildings', 'notes'],
+    additionalProperties: false,
+  };
+  async function initImportBackend() {
+    if (window.claude && typeof window.claude.use === 'function') {
+      try {
+        sampleFn = await window.claude.use('sample');
+        if (sampleFn) { const lim = await sampleFn.limits().catch(() => null); sampleImagesOk = !!(lim && lim.images); }
+      } catch (e) { sampleFn = null; }
+    }
+    const useKey = !(sampleFn && sampleImagesOk);
+    $('key-block').hidden = !useKey;
+    if (useKey) {
+      try { const k = localStorage.getItem(KEY_STORE); if (k) { $('api-key').value = k; $('remember-key').checked = true; } } catch (e) {}
+    }
+    updateReadButton();
+  }
+  function updateReadButton() { $('btn-read').disabled = shotFiles.length === 0; }
+  $('shot-files').addEventListener('change', () => {
+    shotFiles = Array.from($('shot-files').files || []).slice(0, 4);
+    const t = $('shot-thumbs'); t.innerHTML = '';
+    for (const f of shotFiles) { const img = document.createElement('img'); img.alt = f.name; img.src = URL.createObjectURL(f); t.appendChild(img); }
+    $('shot-status').textContent = shotFiles.length ? `${shotFiles.length} image${shotFiles.length > 1 ? 's' : ''} ready.` : '';
+    updateReadButton();
+  });
+  $('remember-key').addEventListener('change', () => { try { if ($('remember-key').checked) localStorage.setItem(KEY_STORE, $('api-key').value.trim()); else localStorage.removeItem(KEY_STORE); } catch (e) {} });
+  $('api-key').addEventListener('change', () => { try { if ($('remember-key').checked) localStorage.setItem(KEY_STORE, $('api-key').value.trim()); } catch (e) {} });
+
+  // Downscale for the API: longest side 1568px, JPEG.
+  function fileToJpegBase64(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const s = Math.min(1, 1568 / Math.max(img.width, img.height));
+        const c = document.createElement('canvas'); c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(img.src);
+        resolve(c.toDataURL('image/jpeg', 0.9).split(',')[1]);
+      };
+      img.onerror = () => reject(new Error('Could not read ' + file.name));
+      img.src = URL.createObjectURL(file);
+    });
+  }
+  async function readViaSample() {
+    return sampleFn.json(importPrompt(), { images: shotFiles, modelTier: 'default', cache: false });
+  }
+  async function readViaApi(key) {
+    const images = [];
+    for (const f of shotFiles) images.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: await fileToJpegBase64(f) } });
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+        'anthropic-beta': 'server-side-fallback-2026-07-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-5-5',
+        max_tokens: 16000,
+        fallbacks: 'default',
+        output_config: { effort: 'medium', format: { type: 'json_schema', schema: IMPORT_SCHEMA } },
+        messages: [{ role: 'user', content: images.concat([{ type: 'text', text: importPrompt() }]) }],
+      }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg = body && body.error && body.error.message ? body.error.message : `HTTP ${res.status}`;
+      if (res.status === 401) throw new Error('The API key was rejected. ' + msg);
+      throw new Error(msg);
+    }
+    if (body.stop_reason === 'refusal') throw new Error('Claude declined to read these images. Try a clearer screenshot.');
+    const text = (body.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    if (body.stop_reason === 'max_tokens') throw new Error('The answer was cut short. Try fewer or smaller screenshots.');
+    try { return JSON.parse(text); } catch (e) { throw new Error('Claude did not return readable JSON. Try again.'); }
+  }
+  function applyImport(data) {
+    if (!data || !Array.isArray(data.buildings)) throw new Error('No buildings were recognised.');
+    const applied = [];
+    let thChanged = false;
+    if (Number.isInteger(data.townHall) && data.townHall >= 3 && data.townHall <= D.maxTH && data.townHall !== inv.th) {
+      inv.th = data.townHall; inv.rows = {}; inv.traps = {}; inv.walls = {}; inv.thWeaponLv = null; result = null; thChanged = true;
+      $('th-select').value = inv.th; $('th-badge').textContent = 'TH ' + inv.th;
+    }
+    for (const b of data.buildings) {
+      const def = D.buildings.find(x => x.id === b.id);
+      if (!def) continue;
+      const max = Math.max(maxCount(def, inv.th), 0);
+      const count = clamp(parseInt(b.count, 10) || 0, 0, Math.max(max, 12));
+      const hardMax = def.levels.length ? def.levels[def.levels.length - 1].lv : 0;
+      const lv = Array.isArray(b.levels) ? b.levels.map(n => clamp(parseInt(n, 10) || 1, 1, hardMax || 1)).slice(0, count) : [];
+      inv.rows[b.id] = { count, levels: hardMax && lv.length ? lv.join(',') : '', place: 'auto' };
+      applied.push(`${def.name} ×${count}`);
+    }
+    save(); buildInventory(); renderAll();
+    return { applied, thChanged, notes: data.notes || '' };
+  }
+  $('btn-read').addEventListener('click', async () => {
+    if (!shotFiles.length) return;
+    const useKey = $('key-block').hidden === false;
+    const key = $('api-key').value.trim();
+    if (useKey && !key) { toast('Enter your Anthropic API key first.'); $('api-key').focus(); return; }
+    $('btn-read').disabled = true; $('shot-status').textContent = 'Reading… this can take up to a minute.';
+    try {
+      const data = useKey ? await readViaApi(key) : await readViaSample();
+      const r = applyImport(data);
+      $('shot-status').textContent = `Filled in ${r.applied.length} building types${r.thChanged ? ' and set TH ' + inv.th : ''}. Check the counts and levels, then optimize.`;
+      toast(r.notes ? 'Claude notes: ' + r.notes : 'Inventory filled in from the screenshots.');
+    } catch (e) {
+      const code = e && e.code;
+      let msg = e && e.message ? e.message : 'Something went wrong.';
+      if (code === 'not_granted') msg = 'You declined to let this page use Claude, so the import is unavailable.';
+      else if (code === 'rate_limited') msg = 'Claude is busy or your usage limit is reached. Try again later.';
+      else if (code === 'image_rejected') msg = 'One of the images was rejected. Use PNG, JPEG or WebP under 20 MB.';
+      else if (code === 'invalid_json') msg = 'Claude did not return readable JSON. Try again.';
+      else if (code === 'refused') msg = 'Claude declined to read these images. Try a clearer screenshot.';
+      $('shot-status').textContent = 'Import failed.'; toast(msg);
+    } finally { updateReadButton(); }
+  });
+  initImportBackend();
 
   // ---------- toast ----------
   let toastTimer = 0;
